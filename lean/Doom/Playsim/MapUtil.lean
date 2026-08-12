@@ -9,7 +9,8 @@ import Doom.Playsim.Mobj
 # Doom.Playsim.MapUtil
 
 `p_maputl.c` open subset: point/box line side, line opening, thing position
-link/unlink (sector + blockmap), blockmap iterators.
+link/unlink (sector + blockmap), blockmap iterators, and `P_PathTraverse`
+(intercepts / `PT_ADDLINES` only — `PT_ADDTHINGS` loud-errors).
 -/
 
 namespace Doom.Playsim.MapUtil
@@ -272,5 +273,239 @@ def blockThingsIterator {σ : Type} (gs0 : GameState) (st0 : σ) (bx byCoord : I
           return (gs, st, false)
         cur := next
     pure (gs, st, true)
+
+/-- `P_AproxDistance` (`p_maputl.c`) — shared by slide/hit and enemy chase. -/
+def aproxDistance (dx0 dy0 : Int32) : Int32 :=
+  let dx := wabs dx0
+  let dy := wabs dy0
+  if dx < dy then dx + dy - (dx >>> 1) else dx + dy - (dy >>> 1)
+
+/-- `p_local.h` path-traverse flags. -/
+def PT_ADDLINES : Nat := 1
+def PT_ADDTHINGS : Nat := 2
+def PT_EARLYOUT : Nat := 4
+
+/-- `MAXINTERCEPTS_ORIGINAL` — overflow is a loud-error (no overrun emu). -/
+def MAXINTERCEPTS : Nat := 128
+
+/-- `MAPBLOCKSIZE` = 128*FRACUNIT; `MAPBMASK`; `MAPBTOFRAC` = 7. -/
+def MAPBLOCKSIZE : Int32 := 128 * FRACUNIT
+def MAPBMASK : Int32 := MAPBLOCKSIZE - 1
+def MAPBTOFRAC : Nat := 7
+
+/-- `divline_t` — canonical playsim divline (also used by Sight). -/
+structure Divline where
+  x : Int32
+  y : Int32
+  dx : Int32
+  dy : Int32
+
+/-- One intercept entry (`intercept_t`); things unused in this open subset. -/
+structure Intercept where
+  frac : Int32
+  isaline : Bool
+  /-- Linedef index when `isaline`. -/
+  lineIdx : Nat
+
+/-- Path-traverse scratch (C globals `trace` / `earlyout` / `intercepts`). -/
+structure PathTraverseState where
+  trace : Divline
+  earlyout : Bool
+  intercepts : Array Intercept
+
+/--
+`P_InterceptVector` / `P_InterceptVector2` — fractional intercept along `v2`
+(`den == 0 → 0`, FixedDiv overflow clamps).
+-/
+def interceptVector (v2 v1 : Divline) : Int32 :=
+  let den := fixedMul (v1.dy >>> 8) v2.dx - fixedMul (v1.dx >>> 8) v2.dy
+  if den == 0 then
+    0
+  else
+    let num :=
+      fixedMul ((v1.x - v2.x) >>> 8) v1.dy + fixedMul ((v2.y - v1.y) >>> 8) v1.dx
+    fixedDiv num den
+
+/-- Alias used by Sight (`P_InterceptVector2`). -/
+def interceptVector2 (v2 v1 : Divline) : Int32 := interceptVector v2 v1
+
+/-- `P_PointOnDivlineSide` — 0 front, 1 back (no on-line ternary). -/
+def pointOnDivlineSide (x y : Int32) (line : Divline) : Nat :=
+  if line.dx == 0 then
+    if x <= line.x then
+      if line.dy > 0 then 1 else 0
+    else
+      if line.dy < 0 then 1 else 0
+  else if line.dy == 0 then
+    if y <= line.y then
+      if line.dx < 0 then 1 else 0
+    else
+      if line.dx > 0 then 1 else 0
+  else
+    let dx := x - line.x
+    let dy := y - line.y
+    -- quick sign-bit reject
+    if ((line.dy ^^^ line.dx ^^^ dx ^^^ dy) &&& (0x80000000 : Int32)) != 0 then
+      if ((line.dy ^^^ dx) &&& (0x80000000 : Int32)) != 0 then 1 else 0
+    else
+      let left := fixedMul (line.dy >>> 8) (dx >>> 8)
+      let right := fixedMul (dy >>> 8) (line.dx >>> 8)
+      if right < left then 0 else 1
+
+/-- `P_MakeDivline`. -/
+def makeDivline (ld : Line) (v1 : Vertex) : Divline :=
+  { x := v1.x, y := v1.y, dx := ld.dx, dy := ld.dy }
+
+/-- `PIT_AddLineIntercepts`. Returns `false` to early-out. -/
+def pitAddLineIntercepts (gs : GameState) (pts0 : PathTraverseState) (lineIdx : Nat)
+    (ld : Line) : Except String (PathTraverseState × Bool) := do
+  match gs.level.vertexes[ld.v1.toNat]?, gs.level.vertexes[ld.v2.toNat]? with
+  | none, _ => throw "PIT_AddLineIntercepts: bad v1"
+  | _, none => throw "PIT_AddLineIntercepts: bad v2"
+  | some v1, some v2 =>
+    let trace := pts0.trace
+    let (s1, s2) :=
+      if trace.dx > 16 * FRACUNIT || trace.dy > 16 * FRACUNIT ||
+          trace.dx < (-16) * FRACUNIT || trace.dy < (-16) * FRACUNIT then
+        (pointOnDivlineSide v1.x v1.y trace, pointOnDivlineSide v2.x v2.y trace)
+      else
+        (pointOnLineSide trace.x trace.y ld v1,
+         pointOnLineSide (trace.x + trace.dx) (trace.y + trace.dy) ld v1)
+    if s1 == s2 then
+      return (pts0, true)
+    let dl := makeDivline ld v1
+    let frac := interceptVector trace dl
+    if frac < 0 then
+      return (pts0, true)
+    if pts0.earlyout && frac < FRACUNIT && ld.backsector < 0 then
+      return (pts0, false)
+    if pts0.intercepts.size >= MAXINTERCEPTS then
+      throw "PIT_AddLineIntercepts: intercepts overrun"
+    let pts := {
+      pts0 with
+      intercepts := pts0.intercepts.push { frac, isaline := true, lineIdx }
+    }
+    pure (pts, true)
+
+/--
+`P_TraverseIntercepts` — sort by ascending `frac`, call `trav` until false or
+`frac > maxfrac`. Mutates intercept fracs to `Int32.maxValue` after visit.
+-/
+def traverseIntercepts {σ : Type} (gs0 : GameState) (pts0 : PathTraverseState) (st0 : σ)
+    (maxfrac : Int32)
+    (trav : GameState → σ → Intercept → Except String (GameState × σ × Bool)) :
+    Except String (GameState × PathTraverseState × σ × Bool) := do
+  let mut gs := gs0
+  let mut pts := pts0
+  let mut st := st0
+  let mut count := pts.intercepts.size
+  let mut guard : Nat := count + 1
+  while count > 0 && guard > 0 do
+    guard := guard - 1
+    count := count - 1
+    let mut dist : Int32 := Int32.maxValue
+    let mut bestIdx : Nat := 0
+    let mut i : Nat := 0
+    while i < pts.intercepts.size do
+      match pts.intercepts[i]? with
+      | none => throw "P_TraverseIntercepts: bad intercept"
+      | some scan =>
+        if scan.frac < dist then
+          dist := scan.frac
+          bestIdx := i
+      i := i + 1
+    if dist > maxfrac then
+      return (gs, pts, st, true)
+    match pts.intercepts[bestIdx]? with
+    | none => throw "P_TraverseIntercepts: lost best"
+    | some inn =>
+      let (gs1, st1, ok) ← trav gs st inn
+      gs := gs1
+      st := st1
+      pts := {
+        pts with
+        intercepts := setArr pts.intercepts bestIdx { inn with frac := Int32.maxValue }
+      }
+      if !ok then
+        return (gs, pts, st, false)
+  pure (gs, pts, st, true)
+
+/--
+`P_PathTraverse` — blockmap DDA + line intercepts. `PT_ADDTHINGS` is a
+loud-error (unused by `P_SlideMove`).
+-/
+def pathTraverse {σ : Type} (gs0 : GameState) (st0 : σ)
+    (x1_0 y1_0 x2 y2 : Int32) (flags : Nat)
+    (trav : GameState → σ → Intercept → Except String (GameState × σ × Bool)) :
+    Except String (GameState × σ × Bool) := do
+  if (flags &&& PT_ADDTHINGS) != 0 then
+    throw "P_PathTraverse: PT_ADDTHINGS not implemented"
+  let earlyout := (flags &&& PT_EARLYOUT) != 0
+  let mut gs := { gs0 with validcount := gs0.validcount + 1 }
+  let bmap := gs.level.blockmap
+  let mut x1 := x1_0
+  let mut y1 := y1_0
+  if ((x1 - bmap.originX) &&& MAPBMASK) == 0 then
+    x1 := x1 + FRACUNIT
+  if ((y1 - bmap.originY) &&& MAPBMASK) == 0 then
+    y1 := y1 + FRACUNIT
+  let mut pts : PathTraverseState := {
+    trace := { x := x1, y := y1, dx := x2 - x1, dy := y2 - y1 }
+    earlyout
+    intercepts := #[]
+  }
+  let x1b := x1 - bmap.originX
+  let y1b := y1 - bmap.originY
+  let x2b := x2 - bmap.originX
+  let y2b := y2 - bmap.originY
+  let xt1 := ashrMapBlock x1b
+  let yt1 := ashrMapBlock y1b
+  let xt2 := ashrMapBlock x2b
+  let yt2 := ashrMapBlock y2b
+  let (mapxstep, partialX, ystep) : Int32 × Int32 × Int32 :=
+    if xt2 > xt1 then
+      (1, FRACUNIT - ((x1b >>> 7) &&& (FRACUNIT - 1)),
+       fixedDiv (y2b - y1b) (wabs (x2b - x1b)))
+    else if xt2 < xt1 then
+      ((-1 : Int32), (x1b >>> 7) &&& (FRACUNIT - 1),
+       fixedDiv (y2b - y1b) (wabs (x2b - x1b)))
+    else
+      (0, FRACUNIT, 256 * FRACUNIT)
+  let mut yintercept := (y1b >>> 7) + fixedMul partialX ystep
+  let (mapystep, partialY, xstep) : Int32 × Int32 × Int32 :=
+    if yt2 > yt1 then
+      (1, FRACUNIT - ((y1b >>> 7) &&& (FRACUNIT - 1)),
+       fixedDiv (x2b - x1b) (wabs (y2b - y1b)))
+    else if yt2 < yt1 then
+      ((-1 : Int32), (y1b >>> 7) &&& (FRACUNIT - 1),
+       fixedDiv (x2b - x1b) (wabs (y2b - y1b)))
+    else
+      (0, FRACUNIT, 256 * FRACUNIT)
+  let mut xintercept := (x1b >>> 7) + fixedMul partialY xstep
+  let mut mapx := xt1
+  let mut mapy := yt1
+  let mut count : Nat := 0
+  let mut cont := true
+  while cont && count < 64 do
+    count := count + 1
+    if (flags &&& PT_ADDLINES) != 0 then
+      let (gs1, pts1, ok) ← blockLinesIterator gs pts mapx mapy
+        fun gs st li ld => do
+          let (st1, ok) ← pitAddLineIntercepts gs st li ld
+          pure (gs, st1, ok)
+      gs := gs1
+      pts := pts1
+      if !ok then
+        return (gs, st0, false)
+    if mapx == xt2 && mapy == yt2 then
+      cont := false
+    else if (yintercept >>> 16) == mapy then
+      yintercept := yintercept + ystep
+      mapx := mapx + mapxstep
+    else if (xintercept >>> 16) == mapx then
+      xintercept := xintercept + xstep
+      mapy := mapy + mapystep
+  let (gs2, _pts2, st2, ok) ← traverseIntercepts gs pts st0 FRACUNIT trav
+  pure (gs2, st2, ok)
 
 end Doom.Playsim.MapUtil

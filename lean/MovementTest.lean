@@ -2,6 +2,7 @@ import Doom.Playsim.Angle
 import Doom.Playsim.Fixed
 import Doom.Playsim.GameState
 import Doom.Playsim.Level
+import Doom.Playsim.Map
 import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
@@ -13,14 +14,15 @@ import Doom.Playsim.Think
 import Doom.Wad
 
 /-!
-P2c-ii implementation tests: P_ZMovement gravity/land, P_CalcHeight airborne,
-sfx_oof pitch RNG, plus retained P2c-i thrust/friction/opening coverage.
+P2c-iv implementation tests: `P_HitSlideLine` / `P_InterceptVector` units,
+plus retained P2c-ii Z/thrust/friction/opening and P2c-i coverage.
 -/
 
 open Doom.Wad
 open Doom.Playsim.Angle
 open Doom.Playsim.Fixed
 open Doom.Playsim.Level
+open Doom.Playsim.Map
 open Doom.Playsim.MapUtil
 open Doom.Playsim.PlayerThink
 open Doom.Playsim.Random
@@ -318,6 +320,81 @@ def main (_args : List String) : IO UInt32 := do
       | Except.ok gs3 =>
         let head3 := match gs3.blocklinks[bi]? with | some v => v | none => (-2 : Int32)
         ok := (← assert "blocklinks empty after unset" (head3 == -1)) && ok
+
+  -- P_InterceptVector (alias of Sight.interceptVector2 semantics) -------------
+  let v2 : Divline := { x := 0, y := 0, dx := 100 * 65536, dy := 0 }
+  let v1 : Divline := { x := 50 * 65536, y := -10 * 65536, dx := 0, dy := 20 * 65536 }
+  ok := (← assert "interceptVector crossing"
+    (interceptVector v2 v1 == 32768)) && ok
+  ok := (← assert "interceptVector parallel den0"
+    (interceptVector v2 { x := 0, y := 0, dx := 50 * 65536, dy := 0 } == 0)) && ok
+
+  -- P_HitSlideLine H/V axis zeroing (E1M5 real linedefs) ---------------------
+  let sl0 : SlideState := {
+    slidemoIdx := 0
+    bestslidefrac := 0
+    bestslideline := 0
+    secondslidefrac := 0
+    secondslideline := 0
+    tmxmove := 1000
+    tmymove := 2000
+  }
+  match loadMap (← loadFile ((← defaultRoot) / "fixtures" / "wads" / "doom1.wad")) "E1M5" with
+  | Except.error e =>
+    ok := (← assert s!"load E1M5 for HitSlideLine ({e})" false) && ok
+  | Except.ok level =>
+    let gs := Doom.Playsim.GameState.initFromLevel level 3 #[true, false, false, false] 0
+    let mut foundH : Option Line := none
+    let mut foundV : Option Line := none
+    let mut foundD : Option Line := none
+    let mut li : Nat := 0
+    while li < level.lines.size do
+      match level.lines[li]? with
+      | some ld =>
+        if foundH.isNone && ld.slopetype == ST_HORIZONTAL then foundH := some ld
+        if foundV.isNone && ld.slopetype == ST_VERTICAL then foundV := some ld
+        if foundD.isNone && (ld.slopetype == ST_POSITIVE || ld.slopetype == ST_NEGATIVE) then
+          foundD := some ld
+      | none => pure ()
+      li := li + 1
+    match foundH with
+    | none => ok := (← assert "horizontal line exists" false) && ok
+    | some ld =>
+      match hitSlideLine gs sl0 ld with
+      | Except.error e => ok := (← assert s!"HitSlideLine H ({e})" false) && ok
+      | Except.ok sl =>
+        ok := (← assert "HitSlideLine H zeros momy" (sl.tmymove == 0)) && ok
+        ok := (← assert "HitSlideLine H keeps momx" (sl.tmxmove == 1000)) && ok
+    match foundV with
+    | none => ok := (← assert "vertical line exists" false) && ok
+    | some ld =>
+      match hitSlideLine gs sl0 ld with
+      | Except.error e => ok := (← assert s!"HitSlideLine V ({e})" false) && ok
+      | Except.ok sl =>
+        ok := (← assert "HitSlideLine V zeros momx" (sl.tmxmove == 0)) && ok
+        ok := (← assert "HitSlideLine V keeps momy" (sl.tmymove == 2000)) && ok
+    match foundD with
+    | none => ok := (← assert "diagonal line exists" false) && ok
+    | some ld =>
+      match level.vertexes[ld.v1.toNat]? with
+      | none => ok := (← assert "diag v1" false) && ok
+      | some v1 =>
+        let mo := {
+          Doom.Playsim.Mobj.empty with
+          x := v1.x
+          y := v1.y - 2 * FRACUNIT
+        }
+        let gs2 := { gs with mobjs := #[mo] }
+        let slD := { sl0 with tmxmove := FRACUNIT, tmymove := 0 }
+        match hitSlideLine gs2 slD ld with
+        | Except.error e =>
+          ok := (← assert s!"HitSlideLine diag ({e})" false) && ok
+        | Except.ok sl =>
+          -- Hand-check vs C: reflection must keep |newlen| ≤ |mom| scale
+          let before := aproxDistance (FRACUNIT : Int32) 0
+          let after := aproxDistance sl.tmxmove sl.tmymove
+          ok := (← assert "HitSlideLine diag |mom| not grown"
+            (after <= before + 1)) && ok
 
   if ok then
     IO.println "movement-test: all passed"

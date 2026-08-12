@@ -4,6 +4,7 @@ import Doom.Playsim.Flags
 import Doom.Playsim.GameState
 import Doom.Playsim.Info
 import Doom.Playsim.Map
+import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
@@ -27,12 +28,16 @@ open Doom.Playsim.Flags
 open Doom.Playsim.GameState
 open Doom.Playsim.Info
 open Doom.Playsim.Map
+open Doom.Playsim.MapUtil
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sight
 open Doom.Playsim.Sound
 open Doom.Playsim.Tables
+
+/-- Re-export `P_AproxDistance` from MapUtil (canonical `p_maputl` home). -/
+def aproxDistance := MapUtil.aproxDistance
 
 /-- `p_local.h` `MELEERANGE`. -/
 def MELEERANGE : Int32 := 64 * FRACUNIT
@@ -79,13 +84,6 @@ private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
 
 private def setMo (gs : GameState) (i : Nat) (mo : Mobj) : GameState :=
   { gs with mobjs := setArr gs.mobjs i mo }
-
-/-- `P_AproxDistance`. -/
-def aproxDistance (dx0 dy0 : Int32) : Int32 :=
-  let dx := wabs dx0
-  let dy := wabs dy0
-  if dx < dy then dx + dy - (dx >>> 1)
-  else dx + dy - (dy >>> 1)
 
 /-- Resolve `mobjinfo` for a live mobj. -/
 private def infoOf (mo : Mobj) : Except String MobjInfo := do

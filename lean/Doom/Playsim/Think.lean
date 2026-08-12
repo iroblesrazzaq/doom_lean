@@ -94,14 +94,8 @@ def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
           | none => throw "P_XYMovement: lost after blocked"
           | some moB =>
             if moB.player >= 0 then
-              -- P2c-iii TEMPORARY (loud): player P_TryMove failure is a silent
-              -- no-op — leave x/y, break the XY half-step loop, do NOT throw.
-              -- Evidence: DEMO1 tic 60 blocks with posOk=false/spechit=0; C runs
-              -- P_SlideMove (and picks up armor). Digests lock through 59; first
-              -- break is tic 60 on player-path fields. P_SlideMove +
-              -- P_TouchSpecialThing are the next chunk. Monsters/RNG OK @60+.
-              xmove := 0
-              ymove := 0
+              -- P_SlideMove (may also pick up MF_SPECIAL via TryMove/CheckPosition)
+              gs ← slideMove gs mobjIdx
             else if (moB.flags &&& MF_MISSILE) != 0 then
               throw "P_XYMovement: missile explode not implemented"
             else
@@ -357,14 +351,13 @@ def runOneThinker (gs : GameState) (th : Thinker) : Except String GameState := d
     strobeFlashThinker gs th.payload.toNat
   else if th.func == THF_GLOW then
     glowThinker gs th.payload.toNat
-  else if th.func == THF_REMOVED then
-    pure gs
   else
     throw s!"P_RunThinkers: unimplemented THF {th.func}"
 
 /--
 `P_RunThinkers` — index walk; thinkers appended during the walk are visited
-(C linked-list semantics with tail append).
+(C linked-list semantics with tail append). `THF_REMOVED` entries are erased
+in place (C lazy free on encounter).
 -/
 def runThinkers (gs0 : GameState) : Except String GameState := do
   let mut gs := gs0
@@ -373,8 +366,14 @@ def runThinkers (gs0 : GameState) : Except String GameState := do
     match gs.thinkers[i]? with
     | none => throw "P_RunThinkers: missing thinker"
     | some th =>
-      gs ← runOneThinker gs th
-    i := i + 1
+      if th.func == THF_REMOVED then
+        let thinkers :=
+          gs.thinkers.extract 0 i ++ gs.thinkers.extract (i + 1) gs.thinkers.size
+        gs := { gs with thinkers }
+        -- do not advance i — next thinker shifted into place
+      else
+        gs ← runOneThinker gs th
+        i := i + 1
   pure gs
 
 end Doom.Playsim.Think

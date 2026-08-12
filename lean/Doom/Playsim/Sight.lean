@@ -1,6 +1,7 @@
 import Doom.Playsim.Fixed
 import Doom.Playsim.GameState
 import Doom.Playsim.Level
+import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 
 /-!
@@ -15,14 +16,12 @@ namespace Doom.Playsim.Sight
 open Doom.Playsim.Fixed
 open Doom.Playsim.GameState
 open Doom.Playsim.Level
+open Doom.Playsim.MapUtil
 open Doom.Playsim.Mobj
 
-/-- `divline_t`. -/
-structure Divline where
-  x : Int32
-  y : Int32
-  dx : Int32
-  dy : Int32
+/-- Re-export canonical `divline_t` / intercept from MapUtil. -/
+abbrev Divline := MapUtil.Divline
+def interceptVector2 := MapUtil.interceptVector2
 
 /-- Mutable sight walk state (C globals + per-linedef validcount stamps). -/
 structure SightWalk where
@@ -60,19 +59,6 @@ def divlineSide (x y : Int32) (node : Divline) : Nat :=
     if right < left then 0
     else if left == right then 2
     else 1
-
-/--
-`P_InterceptVector2`: fractional intercept along `v2`, including `den == 0 → 0`
-and FixedDiv overflow clamps.
--/
-def interceptVector2 (v2 v1 : Divline) : Int32 :=
-  let den := fixedMul (v1.dy >>> 8) v2.dx - fixedMul (v1.dx >>> 8) v2.dy
-  if den == 0 then
-    0
-  else
-    let num :=
-      fixedMul ((v1.x - v2.x) >>> 8) v1.dy + fixedMul ((v2.y - v1.y) >>> 8) v1.dx
-    fixedDiv num den
 
 private def setLineVC (arr : Array Int32) (i : Nat) (v : Int32) : Array Int32 :=
   if h : i < arr.size then arr.set i v else arr

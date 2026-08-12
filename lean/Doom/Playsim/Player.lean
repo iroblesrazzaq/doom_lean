@@ -63,6 +63,8 @@ structure Player where
   playerstate : Int32
   health : Int32
   armorpoints : Int32
+  /-- Armor class (`armortype`); untraced. Green armor = 1. -/
+  armortype : Int32
   readyweapon : Int32
   pendingweapon : Int32
   weaponowned : Array Int32
@@ -95,6 +97,7 @@ def empty : Player := {
   playerstate := PST_REBORN
   health := 0
   armorpoints := 0
+  armortype := 0
   readyweapon := wp_fist
   pendingweapon := wp_nochange
   weaponowned := Array.replicate NUMWEAPONS 0

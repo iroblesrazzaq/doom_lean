@@ -1,27 +1,33 @@
+import Doom.Playsim.Angle
 import Doom.Playsim.Bsp
 import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
+import Doom.Playsim.Inter
 import Doom.Playsim.Level
 import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
+import Doom.Playsim.Tables
 
 /-!
 # Doom.Playsim.Map
 
-`p_map.c` open subset: `P_CheckPosition` / `P_TryMove` with PIT line/thing
-checks. `P_SlideMove` and specials beyond spechit collect are loud-errors.
+`p_map.c` open subset: `P_CheckPosition` / `P_TryMove` / `P_SlideMove` with
+PIT line/thing checks and `SPR_ARM1` pickup via `P_TouchSpecialThing`.
 -/
 
 namespace Doom.Playsim.Map
 
+open Doom.Playsim.Angle
 open Doom.Playsim.Bsp
 open Doom.Playsim.Fixed
 open Doom.Playsim.Flags
 open Doom.Playsim.GameState
+open Doom.Playsim.Inter
 open Doom.Playsim.Level
 open Doom.Playsim.MapUtil
 open Doom.Playsim.Mobj
+open Doom.Playsim.Tables
 
 /-- `doomdata.h` linedef blocking flags. -/
 def ML_BLOCKING : Int32 := 1
@@ -110,30 +116,31 @@ def pitCheckLine (gs : GameState) (scr : MapScratch) (lineIdx : Nat) (ld : Line)
         scr := { scr with spechit := scr.spechit.push lineIdx }
       pure (scr, true)
 
-/-- `PIT_CheckThing` — solid branch only; other branches loud-error. -/
-def pitCheckThing (gs : GameState) (scr : MapScratch) (thingIdx : Nat) (thing : Mobj) :
-    Except String (MapScratch × Bool) := do
+/-- `PIT_CheckThing` — solid + `MF_SPECIAL`/`MF_PICKUP` → `P_TouchSpecialThing`. -/
+def pitCheckThing (gs0 : GameState) (scr : MapScratch) (thingIdx : Nat) (thing : Mobj) :
+    Except String (GameState × MapScratch × Bool) := do
   if (thing.flags &&& (MF_SOLID ||| MF_SPECIAL ||| MF_SHOOTABLE)) == 0 then
-    return (scr, true)
-  match gs.mobjs[scr.tmthingIdx]? with
+    return (gs0, scr, true)
+  match gs0.mobjs[scr.tmthingIdx]? with
   | none => throw "PIT_CheckThing: bad tmthing"
   | some tmthing =>
     let blockdist := thing.radius + tmthing.radius
     if wabs (thing.x - scr.tmx) >= blockdist || wabs (thing.y - scr.tmy) >= blockdist then
-      return (scr, true)
+      return (gs0, scr, true)
     if thingIdx == scr.tmthingIdx then
-      return (scr, true)
+      return (gs0, scr, true)
     if (tmthing.flags &&& MF_SKULLFLY) != 0 then
       throw "PIT_CheckThing: skullfly not implemented"
     if (tmthing.flags &&& MF_MISSILE) != 0 then
       throw "PIT_CheckThing: missile not implemented"
     if (thing.flags &&& MF_SPECIAL) != 0 then
+      let mut gs := gs0
       if (scr.tmflags &&& MF_PICKUP) != 0 then
-        throw "PIT_CheckThing: pickup not implemented"
+        gs ← touchSpecialThing gs thingIdx scr.tmthingIdx
       -- solid flag decides continue (C: return !solid)
-      pure (scr, (thing.flags &&& MF_SOLID) == 0)
+      pure (gs, scr, (thing.flags &&& MF_SOLID) == 0)
     else
-      pure (scr, (thing.flags &&& MF_SOLID) == 0)
+      pure (gs0, scr, (thing.flags &&& MF_SOLID) == 0)
 
 /-- `P_CheckPosition`. -/
 def checkPosition (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
@@ -186,8 +193,7 @@ def checkPosition (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
           while byCoord <= yh do
             let (gs1, scr1, ok) ← blockThingsIterator gs scr bx byCoord
               fun gs st mi mo => do
-                let (st1, ok) ← pitCheckThing gs st mi mo
-                pure (gs, st1, ok)
+                pitCheckThing gs st mi mo
             gs := gs1
             scr := scr1
             if !ok then
@@ -215,7 +221,7 @@ def checkPosition (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
           bx := bx + 1
         pure (gs, scr, true)
 
-/-- `P_CrossSpecialLine` — none expected before DEMO1 tic 27. -/
+/-- `P_CrossSpecialLine` — none expected before DEMO1 fire/doors. -/
 def crossSpecialLine (_gs : GameState) (lineIdx : Nat) (_side : Nat) (_thingIdx : Nat) :
     Except String Unit :=
   throw s!"P_CrossSpecialLine: special crossed on line {lineIdx} (unexpected)"
@@ -275,5 +281,189 @@ def tryMove (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
                   crossSpecialLine gs lineIdx oldside mobjIdx
               | _, _ => throw "P_TryMove: spechit geometry missing"
       pure (gs, true)
+
+/-- Slide-move scratch (`bestslidefrac` / `tmxmove` / …). -/
+structure SlideState where
+  slidemoIdx : Nat
+  bestslidefrac : Int32
+  bestslideline : Int32
+  secondslidefrac : Int32
+  secondslideline : Int32
+  tmxmove : Int32
+  tmymove : Int32
+
+/-- `P_HitSlideLine` — clip `tmxmove`/`tmymove` along wall. -/
+def hitSlideLine (gs : GameState) (sl : SlideState) (ld : Line) :
+    Except String SlideState := do
+  if ld.slopetype == ST_HORIZONTAL then
+    return { sl with tmymove := 0 }
+  if ld.slopetype == ST_VERTICAL then
+    return { sl with tmxmove := 0 }
+  match gs.mobjs[sl.slidemoIdx]?, gs.level.vertexes[ld.v1.toNat]? with
+  | none, _ => throw "P_HitSlideLine: bad slidemo"
+  | _, none => throw "P_HitSlideLine: bad v1"
+  | some slidemo, some v1 =>
+    let side := pointOnLineSide slidemo.x slidemo.y ld v1
+    let mut lineangle := pointToAngle2 0 0 ld.dx ld.dy
+    if side == 1 then
+      lineangle := lineangle + ANG180
+    let moveangle := pointToAngle2 0 0 sl.tmxmove sl.tmymove
+    let mut deltaangle := moveangle - lineangle
+    if deltaangle > ANG180 then
+      deltaangle := deltaangle + ANG180
+    let lineFine := lineangle >>> ANGLETOFINESHIFT.toUInt32
+    let deltaFine := deltaangle >>> ANGLETOFINESHIFT.toUInt32
+    let movelen := aproxDistance sl.tmxmove sl.tmymove
+    match finecosine[deltaFine.toNat]?, finecosine[lineFine.toNat]?,
+          finesine[lineFine.toNat]? with
+    | some cosD, some cosL, some sinL =>
+      let newlen := fixedMul movelen cosD
+      pure {
+        sl with
+        tmxmove := fixedMul newlen cosL
+        tmymove := fixedMul newlen sinL
+      }
+    | _, _, _ => throw "P_HitSlideLine: fine table OOB"
+
+/-- `PTR_SlideTraverse`. Returns `false` to stop. -/
+def ptrSlideTraverse (gs : GameState) (sl0 : SlideState) (inn : Intercept) :
+    Except String (SlideState × Bool) := do
+  if !inn.isaline then
+    throw "PTR_SlideTraverse: not a line?"
+  match gs.level.lines[inn.lineIdx]?, gs.mobjs[sl0.slidemoIdx]? with
+  | none, _ => throw "PTR_SlideTraverse: bad line"
+  | _, none => throw "PTR_SlideTraverse: bad slidemo"
+  | some li, some slidemo =>
+    let mut blocking := false
+    if (li.flags &&& ML_TWOSIDED) == 0 then
+      match gs.level.vertexes[li.v1.toNat]? with
+      | none => throw "PTR_SlideTraverse: bad v1"
+      | some v1 =>
+        if pointOnLineSide slidemo.x slidemo.y li v1 != 0 then
+          -- don't hit the back side
+          return (sl0, true)
+        blocking := true
+    else
+      let op ← lineOpening gs li
+      if op.openrange < slidemo.height then
+        blocking := true
+      else if op.opentop - slidemo.z < slidemo.height then
+        blocking := true
+      else if op.openbottom - slidemo.z > 24 * FRACUNIT then
+        blocking := true
+    if !blocking then
+      return (sl0, true)
+    -- isblocking: closer than best so far?
+    if inn.frac < sl0.bestslidefrac then
+      pure ({
+        sl0 with
+        secondslidefrac := sl0.bestslidefrac
+        secondslideline := sl0.bestslideline
+        bestslidefrac := inn.frac
+        bestslideline := inn.lineIdx.toInt32
+      }, false)
+    else
+      pure (sl0, false)
+
+/-- Local stair-step fallback used by `P_SlideMove` (C `stairstep:`). -/
+def stairStep (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "P_SlideMove: bad mobj for stairstep"
+  | some mo =>
+    let (gs1, okY) ← tryMove gs0 mobjIdx mo.x (mo.y + mo.momy)
+    if okY then
+      pure gs1
+    else
+      let (gs2, _) ← tryMove gs1 mobjIdx (mo.x + mo.momx) mo.y
+      pure gs2
+
+/-- One of the three leading-corner `P_PathTraverse` calls in `P_SlideMove`. -/
+def traceSlideCorner (gs0 : GameState) (sl0 : SlideState)
+    (x1 y1 x2 y2 : Int32) : Except String (GameState × SlideState) := do
+  let (gs1, sl1, _) ← pathTraverse gs0 sl0 x1 y1 x2 y2 PT_ADDLINES fun gs st inn => do
+    let (st1, ok) ← ptrSlideTraverse gs st inn
+    pure (gs, st1, ok)
+  pure (gs1, sl1)
+
+/-- `P_SlideMove`. -/
+def slideMove (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  let mut gs := gs0
+  let mut hitcount : Nat := 0
+  let mut done := false
+  while !done do
+    hitcount := hitcount + 1
+    match gs.mobjs[mobjIdx]? with
+    | none => throw "P_SlideMove: bad mobj"
+    | some mo =>
+      if hitcount == 3 then
+        gs ← stairStep gs mobjIdx
+        done := true
+      else
+        let (leadx, trailx) :=
+          if mo.momx > 0 then (mo.x + mo.radius, mo.x - mo.radius)
+          else (mo.x - mo.radius, mo.x + mo.radius)
+        let (leady, traily) :=
+          if mo.momy > 0 then (mo.y + mo.radius, mo.y - mo.radius)
+          else (mo.y - mo.radius, mo.y + mo.radius)
+        let mut sl : SlideState := {
+          slidemoIdx := mobjIdx
+          bestslidefrac := FRACUNIT + 1
+          bestslideline := -1
+          secondslidefrac := 0
+          secondslideline := -1
+          tmxmove := 0
+          tmymove := 0
+        }
+        let (gsA, slA) ← traceSlideCorner gs sl leadx leady (leadx + mo.momx) (leady + mo.momy)
+        gs := gsA
+        sl := slA
+        let (gsB, slB) ← traceSlideCorner gs sl trailx leady (trailx + mo.momx) (leady + mo.momy)
+        gs := gsB
+        sl := slB
+        let (gsC, slC) ← traceSlideCorner gs sl leadx traily (leadx + mo.momx) (traily + mo.momy)
+        gs := gsC
+        sl := slC
+        if sl.bestslidefrac == FRACUNIT + 1 then
+          gs ← stairStep gs mobjIdx
+          done := true
+        else
+          let bestFudge := sl.bestslidefrac - (0x800 : Int32)
+          let mut stair := false
+          if bestFudge > 0 then
+            let newx := fixedMul mo.momx bestFudge
+            let newy := fixedMul mo.momy bestFudge
+            let (gs1, ok) ← tryMove gs mobjIdx (mo.x + newx) (mo.y + newy)
+            gs := gs1
+            if !ok then
+              stair := true
+          if stair then
+            gs ← stairStep gs mobjIdx
+            done := true
+          else
+            let mut rem := FRACUNIT - sl.bestslidefrac
+            if rem > FRACUNIT then
+              rem := FRACUNIT
+            if rem <= 0 then
+              done := true
+            else
+              match gs.mobjs[mobjIdx]? with
+              | none => throw "P_SlideMove: lost before remainder"
+              | some mo3 =>
+                sl := {
+                  sl with
+                  tmxmove := fixedMul mo3.momx rem
+                  tmymove := fixedMul mo3.momy rem
+                }
+                match gs.level.lines[sl.bestslideline.toNatClampNeg]? with
+                | none => throw "P_SlideMove: bad bestslideline"
+                | some ld =>
+                  sl ← hitSlideLine gs sl ld
+                  let mo4 := { mo3 with momx := sl.tmxmove, momy := sl.tmymove }
+                  gs := { gs with mobjs := setArr gs.mobjs mobjIdx mo4 }
+                  let (gs1, ok) ← tryMove gs mobjIdx (mo4.x + sl.tmxmove) (mo4.y + sl.tmymove)
+                  gs := gs1
+                  if ok then
+                    done := true
+  pure gs
 
 end Doom.Playsim.Map
