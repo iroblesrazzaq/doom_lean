@@ -61,7 +61,8 @@ def signExtendI8 (b : UInt8) : Int32 :=
 
 /--
 `G_ReadDemoTiccmd` (shorttics): four bytes after the 13-byte header.
-`angleturn = ((unsigned char)<<8)` stored as Int32 bit pattern.
+`angleturn = ((signed char)demo_p[2]) << 8` — sign-extended short in the
+trace payload (`docs/TRACE.md` cmd_angleturn).
 -/
 def readDemoTiccmd (data : ByteArray) (cursor : Nat) :
     Except String (Nat × TicCmd) := do
@@ -78,7 +79,7 @@ def readDemoTiccmd (data : ByteArray) (cursor : Nat) :
   pure (cursor + 4, {
     forwardmove := signExtendI8 b0
     sidemove := signExtendI8 b1
-    angleturn := (b2.toUInt32 <<< 8).toInt32
+    angleturn := signExtendI8 b2 <<< 8
     buttons := b3.toUInt32
   })
 

@@ -30,6 +30,10 @@ structure Mobj where
   threshold : Int32
   /-- Target mobj index, or `-1`. -/
   target : Int32
+  /-- Chase direction (`dirtype_t`); internal only — not in trace payload. -/
+  movedir : Int32
+  /-- Steps until next `P_NewChaseDir`; internal only — not in trace payload. -/
+  movecount : Int32
   floorz : Int32
   ceilingz : Int32
   /-- Subsector index. -/
@@ -52,6 +56,7 @@ def empty : Mobj := {
   sprite := 0, frame := 0, tics := 0, state := 0
   health := 0, flags := 0, radius := 0, height := 0
   reactiontime := 0, lastlook := 0, threshold := 0, target := -1
+  movedir := 0, movecount := 0
   floorz := 0, ceilingz := 0, subsector := 0
   snext := -1, sprev := -1, bnext := -1, bprev := -1, player := -1
 }

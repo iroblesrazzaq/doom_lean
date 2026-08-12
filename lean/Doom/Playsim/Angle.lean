@@ -1,12 +1,17 @@
+import Doom.Playsim.Tables
+
 /-!
 # Doom.Playsim.Angle
 
 Binary Angle Measurement (BAM) constants and `SlopeDiv`, ported from oracle
 `src/tables.h` / `src/tables.c` (vanilla `SlopeDiv`, not any Crispy variant).
-Angles are `UInt32` with natural wrapping.
+Angles are `UInt32` with natural wrapping. Also `R_PointToAngle` /
+`R_PointToAngle2` (oracle `r_main.c`).
 -/
 
 namespace Doom.Playsim.Angle
+
+open Doom.Playsim.Tables
 
 /-- BAM angle type: unsigned 32-bit, wraps naturally. -/
 abbrev Angle := UInt32
@@ -40,5 +45,43 @@ def slopeDiv (num den : UInt32) : UInt32 :=
   else
     let ans := (num <<< 3) / (den >>> 8)
     if ans <= SLOPERANGE then ans else SLOPERANGE
+
+/--
+`R_PointToAngle` relative to origin `(0,0)` after the caller subtracts the
+viewpoint (same as C once `viewx`/`viewy` are set). Arguments are signed
+fixed_t; only non-negative magnitudes are passed to `slopeDiv`.
+-/
+def pointToAngle (x0 y0 : Int32) : UInt32 :=
+  if x0 == 0 && y0 == 0 then
+    0
+  else if x0 >= 0 then
+    if y0 >= 0 then
+      if x0 > y0 then
+        tantoangle.getD (slopeDiv y0.toUInt32 x0.toUInt32).toNat 0
+      else
+        ANG90 - 1 - tantoangle.getD (slopeDiv x0.toUInt32 y0.toUInt32).toNat 0
+    else
+      let y := -y0
+      if x0 > y then
+        (0 : UInt32) - tantoangle.getD (slopeDiv y.toUInt32 x0.toUInt32).toNat 0
+      else
+        ANG270 + tantoangle.getD (slopeDiv x0.toUInt32 y.toUInt32).toNat 0
+  else
+    let x := -x0
+    if y0 >= 0 then
+      if x > y0 then
+        ANG180 - 1 - tantoangle.getD (slopeDiv y0.toUInt32 x.toUInt32).toNat 0
+      else
+        ANG90 + tantoangle.getD (slopeDiv x.toUInt32 y0.toUInt32).toNat 0
+    else
+      let y := -y0
+      if x > y then
+        ANG180 + tantoangle.getD (slopeDiv y.toUInt32 x.toUInt32).toNat 0
+      else
+        ANG270 - 1 - tantoangle.getD (slopeDiv x.toUInt32 y.toUInt32).toNat 0
+
+/-- `R_PointToAngle2`. -/
+def pointToAngle2 (x1 y1 x2 y2 : Int32) : UInt32 :=
+  pointToAngle (x2 - x1) (y2 - y1)
 
 end Doom.Playsim.Angle

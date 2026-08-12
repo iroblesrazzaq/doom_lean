@@ -48,3 +48,7 @@ root = "DigestTest"
 [[lean_exe]]
 name = "movement-test"
 root = "MovementTest"
+
+[[lean_exe]]
+name = "enemy-test"
+root = "EnemyTest"

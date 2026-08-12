@@ -17,6 +17,11 @@ def sfx_sawup : Nat := 10
 def sfx_sawhit : Nat := 13
 def sfx_itemup : Nat := 32
 def sfx_oof : Nat := 34
+def sfx_posit1 : Nat := 36
+def sfx_posit2 : Nat := 37
+def sfx_posit3 : Nat := 38
+def sfx_bgsit1 : Nat := 39
+def sfx_bgsit2 : Nat := 40
 def sfx_tink : Nat := 87
 
 /--

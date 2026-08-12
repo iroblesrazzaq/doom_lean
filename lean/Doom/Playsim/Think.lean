@@ -1,3 +1,4 @@
+import Doom.Playsim.Enemy
 import Doom.Playsim.Flags
 import Doom.Playsim.Fixed
 import Doom.Playsim.GameState
@@ -6,19 +7,19 @@ import Doom.Playsim.Map
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
-import Doom.Playsim.Sight
 import Doom.Playsim.Sound
 import Doom.Playsim.Thinker
 
 /-!
 # Doom.Playsim.Think
 
-`P_SetMobjState`, `P_MobjThinker`, `P_ZMovement`, `A_Look`, light thinkers
-(`p_lights.c`).
+`P_MobjThinker`, `P_ZMovement`, light thinkers (`p_lights.c`).
+Enemy actions / `P_SetMobjState` live in `Enemy` (P2c-iii).
 -/
 
 namespace Doom.Playsim.Think
 
+open Doom.Playsim.Enemy
 open Doom.Playsim.Flags
 open Doom.Playsim.Fixed
 open Doom.Playsim.GameState
@@ -27,9 +28,11 @@ open Doom.Playsim.Map
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
-open Doom.Playsim.Sight
 open Doom.Playsim.Sound
 open Doom.Playsim.Thinker
+
+/-- Re-export for `PlayerThink` / callers that open `Think`. -/
+def setMobjState := Enemy.setMobjState
 
 /-- `statenum_t` player idle / run. -/
 def S_PLAY : UInt32 := 149
@@ -48,156 +51,7 @@ private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
 private def setMo (gs : GameState) (i : Nat) (mo : Mobj) : GameState :=
   { gs with mobjs := setArr gs.mobjs i mo }
 
-/-- `P_LookForPlayers` — `allaround = false` path for DEMO1 tic 0.
-Angle/MELEERANGE gate is incomplete: sight-true must loud-error until ported. -/
-def lookForPlayers (gs0 : GameState) (mobjIdx : Nat) (allaround : Bool) :
-    Except String (GameState × Bool) := do
-  match gs0.mobjs[mobjIdx]? with
-  | none => throw "P_LookForPlayers: bad mobj"
-  | some actor0 =>
-    let mut gs := gs0
-    let mut actor := actor0
-    let mut c : Int32 := 0
-    let stop : Int32 := (actor.lastlook - 1) &&& 3
-    let mut done := false
-    let mut found := false
-    let mut guard : Nat := 0
-    while !done && guard < 8 do
-      guard := guard + 1
-      let look := actor.lastlook
-      let lookNat := look.toNatClampNeg
-      let inGame := match gs.playeringame[lookNat]? with | some true => true | _ => false
-      if !inGame then
-        actor := { actor with lastlook := (look + 1) &&& 3 }
-        gs := setMo gs mobjIdx actor
-      else
-        c := c + 1
-        if c == 2 || look == stop then
-          done := true
-          found := false
-        else
-          match gs.players[lookNat]? with
-          | none =>
-            actor := { actor with lastlook := (look + 1) &&& 3 }
-            gs := setMo gs mobjIdx actor
-          | some player =>
-            if player.health <= 0 then
-              actor := { actor with lastlook := (look + 1) &&& 3 }
-              gs := setMo gs mobjIdx actor
-            else
-              match gs.mobjs[player.mo.toNatClampNeg]? with
-              | none => throw "P_LookForPlayers: player mo missing"
-              | some pmo =>
-                let (gs1, visible) ← checkSight gs actor pmo
-                gs := gs1
-                match gs.mobjs[mobjIdx]? with
-                | none => throw "P_LookForPlayers: actor lost after sight"
-                | some a =>
-                  actor := a
-                  if !visible then
-                    actor := { actor with lastlook := (look + 1) &&& 3 }
-                    gs := setMo gs mobjIdx actor
-                  else if !allaround then
-                    -- Angle/MELEERANGE gate deferred: treat sight as acquire so
-                    -- DEMO1 can reach the wake site; wake itself is deferred in
-                    -- `aLook` (first tracediff @ tic 47 is monster wake fields).
-                    actor := { actor with target := player.mo }
-                    gs := setMo gs mobjIdx actor
-                    found := true
-                    done := true
-                  else
-                    actor := { actor with target := player.mo }
-                    gs := setMo gs mobjIdx actor
-                    found := true
-                    done := true
-    pure (gs, found)
-
-/-- `A_Look`. -/
-def aLook (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
-  match gs0.mobjs[mobjIdx]? with
-  | none => throw "A_Look: bad mobj"
-  | some actor0 =>
-    let mut gs := setMo gs0 mobjIdx { actor0 with threshold := 0 }
-    let actor ←
-      match gs.mobjs[mobjIdx]? with
-      | some a => pure a
-      | none => throw "A_Look: lost mobj"
-    let secIdx ←
-      match gs.level.subsectors[actor.subsector.toNat]? with
-      | some ss => pure ss.sector.toNat
-      | none => throw "A_Look: bad subsector"
-    let soundtarget ←
-      match gs.sectors[secIdx]? with
-      | some sec => pure sec.soundtarget
-      | none => throw "A_Look: bad sector"
-    let mut seeyou := false
-    if soundtarget >= 0 then
-      match gs.mobjs[soundtarget.toNatClampNeg]? with
-      | none => pure ()
-      | some targ =>
-        if (targ.flags &&& MF_SHOOTABLE) != 0 then
-          gs := setMo gs mobjIdx { actor with target := soundtarget }
-          let actor2 ← match gs.mobjs[mobjIdx]? with | some a => pure a | none => throw "A_Look"
-          if (actor2.flags &&& MF_AMBUSH) != 0 then
-            let (gs1, visible) ← checkSight gs actor2 targ
-            gs := gs1
-            if visible then seeyou := true
-          else
-            seeyou := true
-    if !seeyou then
-      let (gs1, found) ← lookForPlayers gs mobjIdx false
-      gs := gs1
-      if !found then
-        return gs
-      seeyou := true
-    -- seeyou: seesound + seestate deferred (P2c-iii). Leave looking so DEMO1
-    -- emits through tic 46; first field divergence is monster wake @ 47.
-    let _ := seeyou
-    pure gs
-
-def runMobjAction (gs0 : GameState) (mobjIdx : Nat) (action : ActionId) :
-    Except String GameState := do
-  if action == actionNull then
-    pure gs0
-  else if action == action_A_Look then
-    aLook gs0 mobjIdx
-  else
-    throw s!"P_MobjThinker/SetMobjState: unimplemented action {action}"
-
-/-- `P_SetMobjState`. Returns `false` if removed (not expected at tic 0). -/
-def setMobjState (gs0 : GameState) (mobjIdx : Nat) (state0 : UInt32) :
-    Except String (GameState × Bool) := do
-  let mut gs := gs0
-  let mut state := state0
-  let mut guard : Nat := 0
-  while guard < 1000000 do
-    guard := guard + 1
-    if state == 0 then
-      throw "P_SetMobjState: S_NULL remove not implemented"
-    match states[state.toNat]? with
-    | none => throw s!"P_SetMobjState: bad state {state}"
-    | some st =>
-      match gs.mobjs[mobjIdx]? with
-      | none => throw "P_SetMobjState: bad mobj"
-      | some mo =>
-        let mo := {
-          mo with
-          state := state
-          tics := st.tics
-          sprite := st.sprite
-          frame := st.frame
-        }
-        gs := setMo gs mobjIdx mo
-        gs ← runMobjAction gs mobjIdx st.action
-        match gs.mobjs[mobjIdx]? with
-        | none => throw "P_SetMobjState: mobj lost after action"
-        | some mo2 =>
-          if mo2.tics != 0 then
-            return (gs, true)
-          state := st.nextstate
-  throw "P_SetMobjState: cycle limit"
-
-/-- `P_XYMovement` (`p_mobj.c`). Player slide is a loud-error (not before tic 27). -/
+/-- `P_XYMovement` (`p_mobj.c`). -/
 def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
   match gs0.mobjs[mobjIdx]? with
   | none => throw "P_XYMovement: bad mobj"
@@ -240,7 +94,14 @@ def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
           | none => throw "P_XYMovement: lost after blocked"
           | some moB =>
             if moB.player >= 0 then
-              throw "P_XYMovement: slide not implemented"
+              -- P2c-iii TEMPORARY (loud): player P_TryMove failure is a silent
+              -- no-op — leave x/y, break the XY half-step loop, do NOT throw.
+              -- Evidence: DEMO1 tic 60 blocks with posOk=false/spechit=0; C runs
+              -- P_SlideMove (and picks up armor). Digests lock through 59; first
+              -- break is tic 60 on player-path fields. P_SlideMove +
+              -- P_TouchSpecialThing are the next chunk. Monsters/RNG OK @60+.
+              xmove := 0
+              ymove := 0
             else if (moB.flags &&& MF_MISSILE) != 0 then
               throw "P_XYMovement: missile explode not implemented"
             else

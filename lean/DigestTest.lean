@@ -2,18 +2,22 @@ import Doom.Harness.TraceFormat
 import Doom.Harness.TraceReader
 
 /-!
-P2c-ii behavior lock: DEMO1 P_ZMovement + airborne P_CalcHeight.
+P2c-iii behavior lock: DEMO1 A_Look wake + A_Chase open subset.
 
-E2E contract (public surface `verify --impl real --tics 48`):
-- candidate digests 0..46 must match fixtures/demo1.dig (no "TIC N" field
-  mismatch for N < 47).
-- First tracediff field divergence exactly at tic 47; must NOT be `momz`
-  (monster wake / sound-RNG fields — Z path is done).
-- Fixture rndindex goldens for tics 0..5 (from fixtures/demo1.trc via
-  tracelib): [1, 2, 67, 68, 69, 70]. Soft DEMO1 landing draws no sfx_oof
-  pitch RNG; Δrnd stays +1/tic through 46.
-- Per-tic player[0] (z, momz, viewz) goldens for tics 27..46 (fixture).
-- XY goldens for tics 6..26 retained from P2c-i.
+E2E contract (public surface `verify --impl real --tics 62`):
+- candidate digests 0..59 must match fixtures/demo1.dig (no "TIC N" field
+  mismatch for N < 60).
+- First tracediff field divergence exactly at tic 60; player-path only
+  (player XY/mom/armor + player mobj thinker[1]; armor bonus tid 204 retained
+  because slide/pickup are next chunk). No monster field mismatches
+  (tid 155/156/157).
+- Monsters + RNG still match fixture at tic 60 (and troop 156 wake @61).
+- Fixture goldens (tracelib on fixtures/demo1.trc):
+  - tid=157 @47: x/y/angle/state = (-6667456,-2473152,0xa0000000,209)
+  - steps @47/50 diagonal -376000 each axis; @53/56/59 cardinal west -524288
+  - angle 0xa0000000→0x80000000 @56
+  - prnd 137@47, 141@53, 146@60; rnd Δ=+2 @47 (ST + seesound pitch)
+  - troop 155 wakes @60 (442→444); troop 156 @61
 -/
 
 open Doom.Harness.TraceFormat
@@ -85,6 +89,15 @@ def playerZGoldens : Array (Nat × Int32 × Int32 × Int32) := #[
   (46, 0, 0, 2271352)
 ]
 
+/-- tid=157 wake/chase goldens: `(tic, x, y, angle, state)`. -/
+def troop157Goldens : Array (Nat × Int32 × Int32 × UInt32 × UInt32) := #[
+  (47, (-6667456 : Int32), -2473152, 0xa0000000, 209),
+  (50, (-7043456 : Int32), -2849152, 0xa0000000, 210),
+  (53, (-7567744 : Int32), -2849152, 0xa0000000, 211),
+  (56, (-8092032 : Int32), -2849152, 0x80000000, 212),
+  (59, (-8616320 : Int32), -2849152, 0x80000000, 213)
+]
+
 /-- Parse first divergence tic number from tracediff output, if any. -/
 def firstMismatchTic (out : String) : Option Nat :=
   let key := "AT TIC "
@@ -98,9 +111,10 @@ def firstMismatchTic (out : String) : Option Nat :=
       let numStr := after.takeWhile (fun c => c.isDigit)
       numStr.toNat?
 
-/-- True when tracediff text mentions `momz` as a diverging field. -/
-def mentionsMomz (out : String) : Bool :=
-  out.contains "momz"
+/-- True when tracediff field list names a chasing monster (not player/armor). -/
+def mentionsMonsterChase (out : String) : Bool :=
+  out.contains "trace_id=155" || out.contains "trace_id=156" ||
+    out.contains "trace_id=157"
 
 def main (_args : List String) : IO UInt32 := do
   let mut ok := true
@@ -115,7 +129,7 @@ def main (_args : List String) : IO UInt32 := do
       "--demo", "DEMO1",
       "--ref-digest", (root / "fixtures" / "demo1.dig").toString,
       "--impl", "real",
-      "--tics", "48",
+      "--tics", "62",
       "--out-dir", verifyOut.toString,
       "--ref-trace", (root / "fixtures" / "demo1.trc").toString,
       "--root", root.toString
@@ -134,7 +148,7 @@ def main (_args : List String) : IO UInt32 := do
   | Except.error e =>
     ok := (← assert s!"parse candidate.trc ({e})" false) && ok
   | Except.ok recs =>
-    ok := (← assert "candidate has >= 48 tics" (recs.size >= 48)) && ok
+    ok := (← assert "candidate has >= 62 tics" (recs.size >= 62)) && ok
     let mut i : Nat := 0
     while i < 6 && i < recs.size do
       match recs[i]?, expectedRndindex[i]? with
@@ -191,6 +205,103 @@ def main (_args : List String) : IO UInt32 := do
             ok := (← assert s!"tic {tic} player viewz"
               (p.viewz == viewz.toUInt32)) && ok
       zi := zi + 1
+    -- Last matching player XY (tic 59) before slide-needed break @60.
+    match recs[59]? with
+    | none => ok := (← assert "tic 59 present" false) && ok
+    | some rec =>
+      match rec.players[0]? with
+      | none => ok := (← assert "tic 59 player0" false) && ok
+      | some p =>
+        ok := (← assert "tic 59 player x=-24573036"
+          (p.x == (-24573036 : Int32).toUInt32)) && ok
+        ok := (← assert "tic 59 player y=-8374393"
+          (p.y == (-8374393 : Int32).toUInt32)) && ok
+    -- Wake RNG + chase goldens
+    match recs[46]?, recs[47]? with
+    | some r46, some r47 =>
+      ok := (← assert "tic 47 prndindex=137" (r47.prndindex == 137)) && ok
+      ok := (← assert "tic 47 Δprnd=+3"
+        (r47.prndindex == r46.prndindex + 3)) && ok
+      ok := (← assert "tic 47 Δrnd=+2"
+        (r47.rndindex == r46.rndindex + 2)) && ok
+    | _, _ =>
+      ok := (← assert "tic 46/47 present for RNG golden" false) && ok
+    match recs[53]? with
+    | some r => ok := (← assert "tic 53 prndindex=141" (r.prndindex == 141)) && ok
+    | none => ok := (← assert "tic 53 present" false) && ok
+    match recs[60]? with
+    | some r =>
+      ok := (← assert "tic 60 prndindex=146" (r.prndindex == 146)) && ok
+      ok := (← assert "tic 60 rndindex=127" (r.rndindex == 127)) && ok
+    | none => ok := (← assert "tic 60 present" false) && ok
+    let mut ti : Nat := 0
+    while ti < troop157Goldens.size do
+      match troop157Goldens[ti]? with
+      | none => ok := (← assert "157 golden row" false) && ok
+      | some (tic, x, y, ang, st) =>
+        match recs[tic]? with
+        | none => ok := (← assert s!"tic {tic} for tid157" false) && ok
+        | some rec =>
+          let mut found := false
+          let mut hi : Nat := 0
+          while hi < rec.thinkers.size do
+            match rec.thinkers[hi]? with
+            | some th =>
+              if th.traceId == 157 then
+                match th.mobj with
+                | some mo =>
+                  found := true
+                  ok := (← assert s!"tic {tic} tid157 x" (mo.x == x.toUInt32)) && ok
+                  ok := (← assert s!"tic {tic} tid157 y" (mo.y == y.toUInt32)) && ok
+                  ok := (← assert s!"tic {tic} tid157 angle" (mo.angle == ang)) && ok
+                  ok := (← assert s!"tic {tic} tid157 state" (mo.state == st)) && ok
+                | none => pure ()
+              pure ()
+            | none => pure ()
+            hi := hi + 1
+          ok := (← assert s!"tic {tic} tid157 present" found) && ok
+      ti := ti + 1
+    -- Troop wakes (monsters match at 60+ even though digest breaks on player)
+    let mut found155 := false
+    let mut found156 := false
+    match recs[60]? with
+    | some rec =>
+      let mut hi : Nat := 0
+      while hi < rec.thinkers.size do
+        match rec.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 155 then
+            match th.mobj with
+            | some mo =>
+              found155 := true
+              ok := (← assert "tic 60 tid155 state=444" (mo.state == 444)) && ok
+              ok := (← assert "tic 60 tid155 x"
+                (mo.x == (16401216 : Int32).toUInt32)) && ok
+              ok := (← assert "tic 60 tid155 y"
+                (mo.y == (3818304 : Int32).toUInt32)) && ok
+            | none => pure ()
+          pure ()
+        | none => pure ()
+        hi := hi + 1
+    | none => pure ()
+    match recs[61]? with
+    | some rec =>
+      let mut hi : Nat := 0
+      while hi < rec.thinkers.size do
+        match rec.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 156 then
+            match th.mobj with
+            | some mo =>
+              found156 := true
+              ok := (← assert "tic 61 tid156 state=444" (mo.state == 444)) && ok
+            | none => pure ()
+          pure ()
+        | none => pure ()
+        hi := hi + 1
+    | none => pure ()
+    ok := (← assert "tic 60 tid155 present" found155) && ok
+    ok := (← assert "tic 61 tid156 present" found156) && ok
 
   let diff ← IO.Process.output {
     cmd := "python3"
@@ -209,15 +320,17 @@ def main (_args : List String) : IO UInt32 := do
   let dout := diff.stdout ++ diff.stderr
   match firstMismatchTic dout with
   | none =>
-    ok := (← assert "tracediff: expected divergence at tic 47 (got none)" false) && ok
+    ok := (← assert "tracediff: expected divergence at tic 60 (got none)" false) && ok
   | some tic =>
-    ok := (← assert s!"tracediff: first divergence tic == 47 (got {tic})"
-      (tic == 47)) && ok
-    ok := (← assert "tracediff: tic 47 field is not momz"
-      (!mentionsMomz dout)) && ok
+    ok := (← assert s!"tracediff: first divergence tic == 60 (got {tic})"
+      (tic == 60)) && ok
+    ok := (← assert "tracediff: tic 60 mentions player"
+      (dout.contains "player")) && ok
+    ok := (← assert "tracediff: tic 60 has no monster chase field diffs"
+      (!mentionsMonsterChase dout)) && ok
 
   if ok then
-    IO.println "ALL DEMO1 DIGEST P2c-ii CHECKS PASSED"
+    IO.println "ALL DEMO1 DIGEST P2c-iii CHECKS PASSED"
     pure 0
   else
     IO.eprintln "SOME DEMO1 DIGEST CHECKS FAILED"
