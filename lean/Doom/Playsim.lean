@@ -1,3 +1,8 @@
+import Doom.Playsim.Fixed
+import Doom.Playsim.Angle
+import Doom.Playsim.Tables
+import Doom.Playsim.Random
+
 /-!
 # Doom.Playsim
 

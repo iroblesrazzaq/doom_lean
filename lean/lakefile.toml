@@ -24,3 +24,7 @@ root = "PerfEncode"
 [[lean_exe]]
 name = "harness-test"
 root = "HarnessTest"
+
+[[lean_exe]]
+name = "playsim-test"
+root = "PlaysimTest"
