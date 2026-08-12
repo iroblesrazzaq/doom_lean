@@ -62,33 +62,41 @@ def calcHeight (gs : GameState) (playerIdx : Nat) (onground : Bool) :
       let bob0 :=
         (fixedMul mo.momx mo.momx + fixedMul mo.momy mo.momy) >>> 2
       let bob1 := if bob0 > MAXBOB then MAXBOB else bob0
+      -- Always compute bob (gun swing); CF_NOMOMENTUM / airborne early-out.
       if (player0.cheats &&& CF_NOMOMENTUM) != 0 || !onground then
-        throw "P_CalcHeight: nomomentum / airborne path unexpected before Z movement"
-      let angle :=
-        ((FINEANGLES.toUInt32 / 20 * gs.leveltime) &&& FINEMASK)
-      let fine ←
-        match finesine[angle.toNat]? with
-        | some v => pure v
-        | none => throw "P_CalcHeight: finesine OOB"
-      let bob := fixedMul (bob1 / 2) fine
-      let mut player := { player0 with bob := bob1 }
-      if player.playerstate == PST_LIVE then
-        player := { player with viewheight := player.viewheight + player.deltaviewheight }
-        if player.viewheight > VIEWHEIGHT then
-          player := { player with viewheight := VIEWHEIGHT, deltaviewheight := 0 }
-        if player.viewheight < VIEWHEIGHT / 2 then
-          let d :=
-            if player.deltaviewheight <= 0 then (1 : Int32) else player.deltaviewheight
-          player := { player with viewheight := VIEWHEIGHT / 2, deltaviewheight := d }
-        if player.deltaviewheight != 0 then
-          let d0 := player.deltaviewheight + FRACUNIT / 4
-          let d := if d0 == 0 then (1 : Int32) else d0
-          player := { player with deltaviewheight := d }
-      let mut viewz := mo.z + player.viewheight + bob
-      if viewz > mo.ceilingz - 4 * FRACUNIT then
-        viewz := mo.ceilingz - 4 * FRACUNIT
-      player := { player with viewz }
-      pure { gs with players := setArr gs.players playerIdx player }
+        let mut viewz := mo.z + VIEWHEIGHT
+        if viewz > mo.ceilingz - 4 * FRACUNIT then
+          viewz := mo.ceilingz - 4 * FRACUNIT
+        -- C overwrites with z+viewheight after the ceiling clamp (quirky).
+        viewz := mo.z + player0.viewheight
+        let player := { player0 with bob := bob1, viewz }
+        pure { gs with players := setArr gs.players playerIdx player }
+      else
+        let angle :=
+          ((FINEANGLES.toUInt32 / 20 * gs.leveltime) &&& FINEMASK)
+        let fine ←
+          match finesine[angle.toNat]? with
+          | some v => pure v
+          | none => throw "P_CalcHeight: finesine OOB"
+        let bob := fixedMul (bob1 / 2) fine
+        let mut player := { player0 with bob := bob1 }
+        if player.playerstate == PST_LIVE then
+          player := { player with viewheight := player.viewheight + player.deltaviewheight }
+          if player.viewheight > VIEWHEIGHT then
+            player := { player with viewheight := VIEWHEIGHT, deltaviewheight := 0 }
+          if player.viewheight < VIEWHEIGHT / 2 then
+            let d :=
+              if player.deltaviewheight <= 0 then (1 : Int32) else player.deltaviewheight
+            player := { player with viewheight := VIEWHEIGHT / 2, deltaviewheight := d }
+          if player.deltaviewheight != 0 then
+            let d0 := player.deltaviewheight + FRACUNIT / 4
+            let d := if d0 == 0 then (1 : Int32) else d0
+            player := { player with deltaviewheight := d }
+        let mut viewz := mo.z + player.viewheight + bob
+        if viewz > mo.ceilingz - 4 * FRACUNIT then
+          viewz := mo.ceilingz - 4 * FRACUNIT
+        player := { player with viewz }
+        pure { gs with players := setArr gs.players playerIdx player }
 
 /-- `P_MovePlayer`. -/
 def movePlayer (gs0 : GameState) (playerIdx : Nat) : Except String (GameState × Bool) := do

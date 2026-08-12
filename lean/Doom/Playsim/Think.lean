@@ -7,12 +7,14 @@ import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sight
+import Doom.Playsim.Sound
 import Doom.Playsim.Thinker
 
 /-!
 # Doom.Playsim.Think
 
-`P_SetMobjState`, `P_MobjThinker`, `A_Look`, light thinkers (`p_lights.c`).
+`P_SetMobjState`, `P_MobjThinker`, `P_ZMovement`, `A_Look`, light thinkers
+(`p_lights.c`).
 -/
 
 namespace Doom.Playsim.Think
@@ -26,6 +28,7 @@ open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sight
+open Doom.Playsim.Sound
 open Doom.Playsim.Thinker
 
 /-- `statenum_t` player idle / run. -/
@@ -34,6 +37,8 @@ def S_PLAY_RUN1 : UInt32 := 150
 
 def STOPSPEED : Int32 := 0x1000
 def FRICTION : Int32 := 0xe800
+/-- `GRAVITY` (`p_local.h`) — `FRACUNIT`. -/
+def GRAVITY : Int32 := FRACUNIT
 /-- `CF_NOMOMENTUM` cheat bit (`p_user.c` / `p_local.h`). -/
 def CF_NOMOMENTUM : Int32 := 8
 
@@ -93,7 +98,13 @@ def lookForPlayers (gs0 : GameState) (mobjIdx : Nat) (allaround : Bool) :
                     actor := { actor with lastlook := (look + 1) &&& 3 }
                     gs := setMo gs mobjIdx actor
                   else if !allaround then
-                    throw "P_LookForPlayers: sight true — angle/MELEERANGE gate not implemented"
+                    -- Angle/MELEERANGE gate deferred: treat sight as acquire so
+                    -- DEMO1 can reach the wake site; wake itself is deferred in
+                    -- `aLook` (first tracediff @ tic 47 is monster wake fields).
+                    actor := { actor with target := player.mo }
+                    gs := setMo gs mobjIdx actor
+                    found := true
+                    done := true
                   else
                     actor := { actor with target := player.mo }
                     gs := setMo gs mobjIdx actor
@@ -139,8 +150,10 @@ def aLook (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
       if !found then
         return gs
       seeyou := true
-    -- seeyou: seesound + seestate — waking at tic 0 would need sound RNG; loud stop
-    throw "A_Look: player sighted (wake path) — unexpected at DEMO1 tic 0"
+    -- seeyou: seesound + seestate deferred (P2c-iii). Leave looking so DEMO1
+    -- emits through tic 46; first field divergence is monster wake @ 47.
+    let _ := seeyou
+    pure gs
 
 def runMobjAction (gs0 : GameState) (mobjIdx : Nat) (action : ActionId) :
     Except String GameState := do
@@ -284,7 +297,74 @@ def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
           momy := fixedMul moF.momy FRICTION
         })
 
-/-- `P_MobjThinker` — XY movement; Z deferred as documented no-op until P_ZMovement. -/
+/-- `P_ZMovement` (`p_mobj.c`) — DEMO1 open subset (no float/skull/missile). -/
+def zMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "P_ZMovement: bad mobj"
+  | some mo0 =>
+    let mut gs := gs0
+    let mut mo := mo0
+    -- Smooth step-up when XY raised floorz under a player still below it.
+    if mo.player >= 0 && mo.z < mo.floorz then
+      match gs.players[mo.player.toNatClampNeg]? with
+      | none => throw "P_ZMovement: bad player for step-up"
+      | some pl =>
+        let vh := pl.viewheight - (mo.floorz - mo.z)
+        let dv := (VIEWHEIGHT - vh) >>> 3
+        gs := {
+          gs with
+          players := setArr gs.players mo.player.toNatClampNeg
+            { pl with viewheight := vh, deltaviewheight := dv }
+        }
+    mo := { mo with z := mo.z + mo.momz }
+    gs := setMo gs mobjIdx mo
+    if (mo.flags &&& MF_FLOAT) != 0 && mo.target >= 0 then
+      throw "P_ZMovement: MF_FLOAT+target float path not implemented"
+    if (mo.flags &&& MF_SKULLFLY) != 0 then
+      throw "P_ZMovement: MF_SKULLFLY path not implemented"
+    -- Floor clip
+    if mo.z <= mo.floorz then
+      if mo.momz < 0 then
+        if mo.player >= 0 && mo.momz < -GRAVITY * 8 then
+          match gs.players[mo.player.toNatClampNeg]? with
+          | none => throw "P_ZMovement: bad player for hard land"
+          | some pl =>
+            let pl := { pl with deltaviewheight := mo.momz >>> 3 }
+            gs := {
+              gs with
+              players := setArr gs.players mo.player.toNatClampNeg pl
+              rng := startSoundPitchRng gs.rng sfx_oof
+            }
+        mo := { mo with momz := 0 }
+      mo := { mo with z := mo.floorz }
+      gs := setMo gs mobjIdx mo
+      if (mo.flags &&& MF_MISSILE) != 0 && (mo.flags &&& MF_NOCLIP) == 0 then
+        throw "P_ZMovement: missile floor explode not implemented"
+    else if (mo.flags &&& MF_NOGRAVITY) == 0 then
+      let momz :=
+        if mo.momz == 0 then -GRAVITY * 2
+        else mo.momz - GRAVITY
+      mo := { mo with momz }
+      gs := setMo gs mobjIdx mo
+    -- Ceiling clip
+    match gs.mobjs[mobjIdx]? with
+    | none => throw "P_ZMovement: lost before ceiling"
+    | some moC =>
+      if moC.z + moC.height > moC.ceilingz then
+        let mut mo2 := moC
+        if mo2.momz > 0 then
+          mo2 := { mo2 with momz := 0 }
+        mo2 := { mo2 with z := mo2.ceilingz - mo2.height }
+        gs := setMo gs mobjIdx mo2
+        if (mo2.flags &&& MF_SKULLFLY) != 0 then
+          throw "P_ZMovement: MF_SKULLFLY ceiling bounce not implemented"
+        if (mo2.flags &&& MF_MISSILE) != 0 && (mo2.flags &&& MF_NOCLIP) == 0 then
+          throw "P_ZMovement: missile ceiling explode not implemented"
+        pure gs
+      else
+        pure gs
+
+/-- `P_MobjThinker` — XY + Z movement, then state tic countdown. -/
 def mobjThinker (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
   match gs0.mobjs[mobjIdx]? with
   | none => throw "P_MobjThinker: bad mobj"
@@ -298,26 +378,29 @@ def mobjThinker (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := d
     match gs.mobjs[mobjIdx]? with
     | none => return gs
     | some mo2 =>
-      -- P_ZMovement deferred: no-op so DEMO1 can emit divergent tic-27 momz.
       if mo2.z != mo2.floorz || mo2.momz != 0 then
-        pure ()
-      if mo2.tics != -1 then
-        let tics := mo2.tics - 1
-        gs := setMo gs mobjIdx { mo2 with tics }
-        if tics == 0 then
-          match gs.mobjs[mobjIdx]? with
-          | none => throw "P_MobjThinker: lost"
-          | some mo3 =>
-            match states[mo3.state.toNat]? with
-            | none => throw "P_MobjThinker: bad state"
-            | some st =>
-              let (gs2, _) ← setMobjState gs mobjIdx st.nextstate
-              pure gs2
+        gs ← zMovement gs mobjIdx
+      -- Re-fetch after Z — no stale writes into the tic countdown.
+      match gs.mobjs[mobjIdx]? with
+      | none => return gs
+      | some moZ =>
+        if moZ.tics != -1 then
+          let tics := moZ.tics - 1
+          gs := setMo gs mobjIdx { moZ with tics }
+          if tics == 0 then
+            match gs.mobjs[mobjIdx]? with
+            | none => throw "P_MobjThinker: lost"
+            | some mo3 =>
+              match states[mo3.state.toNat]? with
+              | none => throw "P_MobjThinker: bad state"
+              | some st =>
+                let (gs2, _) ← setMobjState gs mobjIdx st.nextstate
+                pure gs2
+          else
+            pure gs
         else
+          -- nightmare respawn path unused
           pure gs
-      else
-        -- nightmare respawn path unused
-        pure gs
 
 /-- `T_LightFlash`. -/
 def lightFlashThinker (gs0 : GameState) (payload : Nat) : Except String GameState := do

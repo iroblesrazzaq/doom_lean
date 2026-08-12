@@ -6,12 +6,15 @@ import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.PlayerThink
+import Doom.Playsim.Random
+import Doom.Playsim.Sound
 import Doom.Playsim.Tables
 import Doom.Playsim.Think
 import Doom.Wad
 
 /-!
-P2c-i implementation tests: P_Thrust, FRICTION FixedMul, P_LineOpening on E1M5.
+P2c-ii implementation tests: P_ZMovement gravity/land, P_CalcHeight airborne,
+sfx_oof pitch RNG, plus retained P2c-i thrust/friction/opening coverage.
 -/
 
 open Doom.Wad
@@ -20,6 +23,8 @@ open Doom.Playsim.Fixed
 open Doom.Playsim.Level
 open Doom.Playsim.MapUtil
 open Doom.Playsim.PlayerThink
+open Doom.Playsim.Random
+open Doom.Playsim.Sound
 open Doom.Playsim.Tables
 open Doom.Playsim.Think
 
@@ -55,7 +60,7 @@ def loadMap (wad : WadDirectory) (label : String) : Except String LevelData := d
     let blockmap ← mapLumpData wad idx ML_BLOCKMAP
     buildLevel things linedefs sidedefs vertexes segs ssectors nodes sectors reject blockmap
 
-/-- Minimal GS with one player mobj for thrust tests. -/
+/-- Minimal GS with one player mobj for thrust / Z tests. -/
 def thrustFixture : Doom.Playsim.GameState.GameState :=
   let emptyLevel : LevelData := {
     vertexes := #[]
@@ -70,12 +75,31 @@ def thrustFixture : Doom.Playsim.GameState.GameState :=
     reject := ByteArray.empty
   }
   let gs0 := Doom.Playsim.GameState.initFromLevel emptyLevel 2 #[true, false, false, false] 0
-  let mo := { Doom.Playsim.Mobj.empty with player := 0 }
-  let p := { Doom.Playsim.Player.empty with mo := 0, playerstate := Doom.Playsim.Player.PST_LIVE }
+  let mo := {
+    Doom.Playsim.Mobj.empty with
+    player := 0
+    floorz := 0
+    ceilingz := 128 * FRACUNIT
+    height := 56 * FRACUNIT
+  }
+  let p := {
+    Doom.Playsim.Player.empty with
+    mo := 0
+    playerstate := Doom.Playsim.Player.PST_LIVE
+    viewheight := Doom.Playsim.Player.VIEWHEIGHT
+  }
   { gs0 with
     mobjs := #[mo]
     players := Doom.Playsim.GameState.arrSet gs0.players 0 p
   }
+
+/-- GS with player above floor (airborne Z). -/
+def airborneFixture (z momz floorz : Int32) : Doom.Playsim.GameState.GameState :=
+  let gs := thrustFixture
+  match gs.mobjs[0]? with
+  | none => gs
+  | some mo =>
+    { gs with mobjs := #[ { mo with z, momz, floorz } ] }
 
 def main (_args : List String) : IO UInt32 := do
   let mut ok := true
@@ -85,6 +109,114 @@ def main (_args : List String) : IO UInt32 := do
     (fixedMul (801403 : Int32) FRICTION == (726271 : Int32))) && ok
   ok := (← assert "FixedMul FRICTION -47542"
     (fixedMul (-47542 : Int32) FRICTION == (-43085 : Int32))) && ok
+
+  -- First-fall momz: momz==0 airborne → -GRAVITY*2 ------------------------------
+  match zMovement (airborneFixture 0 0 (-16 * FRACUNIT)) 0 with
+  | Except.error e =>
+    ok := (← assert s!"zMovement first-fall ({e})" false) && ok
+  | Except.ok gs =>
+    match gs.mobjs[0]? with
+    | none => ok := (← assert "zMovement first-fall mo" false) && ok
+    | some mo =>
+      ok := (← assert "first-fall momz=-GRAVITY*2"
+        (mo.momz == -GRAVITY * 2)) && ok
+      ok := (← assert "first-fall z unchanged (momz was 0)"
+        (mo.z == 0)) && ok
+
+  -- Gravity decrement when already falling ------------------------------------
+  match zMovement (airborneFixture (-131072) (-131072) (-16 * FRACUNIT)) 0 with
+  | Except.error e =>
+    ok := (← assert s!"zMovement gravity dec ({e})" false) && ok
+  | Except.ok gs =>
+    match gs.mobjs[0]? with
+    | none => ok := (← assert "gravity dec mo" false) && ok
+    | some mo =>
+      ok := (← assert "gravity momz -= GRAVITY"
+        (mo.momz == -131072 - GRAVITY)) && ok
+      ok := (← assert "gravity z += prior momz"
+        (mo.z == -131072 + -131072)) && ok
+
+  -- Smooth step-up: player z < floorz adjusts viewheight / deltaviewheight ----
+  let stepFloor : Int32 := 0
+  let stepZ : Int32 := -8 * FRACUNIT
+  let stepGs0 := airborneFixture stepZ 0 stepFloor
+  match zMovement stepGs0 0 with
+  | Except.error e =>
+    ok := (← assert s!"zMovement step-up ({e})" false) && ok
+  | Except.ok gs =>
+    match gs.players[0]?, gs.mobjs[0]? with
+    | some pl, some mo =>
+      let expectedVh := Doom.Playsim.Player.VIEWHEIGHT - (stepFloor - stepZ)
+      ok := (← assert "step-up viewheight"
+        (pl.viewheight == expectedVh)) && ok
+      ok := (← assert "step-up deltaviewheight"
+        (pl.deltaviewheight == (Doom.Playsim.Player.VIEWHEIGHT - expectedVh) >>> 3)) && ok
+      -- momz was 0 so floor hit clamps z without hard-land; no gravity branch.
+      ok := (← assert "step-up z clamped to floorz" (mo.z == stepFloor)) && ok
+      ok := (← assert "step-up momz stays 0" (mo.momz == 0)) && ok
+    | _, _ =>
+      ok := (← assert "step-up player/mo" false) && ok
+
+  -- Soft floor clamp (impact momz > -GRAVITY*8): no RNG, momz=0, z=floorz ------
+  let softImpact : Int32 := -393216  -- DEMO1 land; > -524288
+  let softFloor : Int32 := -1048576
+  -- Start above floor so z+momz crosses floorz.
+  let softGs0 :=
+    let g := airborneFixture (softFloor - softImpact) softImpact softFloor
+    g
+  let rngBefore := softGs0.rng.rndindex
+  match zMovement softGs0 0 with
+  | Except.error e =>
+    ok := (← assert s!"zMovement soft land ({e})" false) && ok
+  | Except.ok gs =>
+    match gs.mobjs[0]? with
+    | none => ok := (← assert "soft land mo" false) && ok
+    | some mo =>
+      ok := (← assert "soft land momz=0" (mo.momz == 0)) && ok
+      ok := (← assert "soft land z=floorz" (mo.z == softFloor)) && ok
+      ok := (← assert "soft land no sfx RNG"
+        (gs.rng.rndindex == rngBefore)) && ok
+
+  -- Hard land: deltaviewheight = momz>>3 + one sfx_oof pitch draw --------------
+  let hardMomz : Int32 := -GRAVITY * 8 - 1
+  let hardFloor : Int32 := 0
+  let hardGs0 :=
+    let g := airborneFixture (hardFloor - hardMomz) hardMomz hardFloor
+    { g with rng := { g.rng with rndindex := 10 } }
+  match zMovement hardGs0 0 with
+  | Except.error e =>
+    ok := (← assert s!"zMovement hard land ({e})" false) && ok
+  | Except.ok gs =>
+    match gs.mobjs[0]?, gs.players[0]? with
+    | some mo, some pl =>
+      ok := (← assert "hard land momz=0" (mo.momz == 0)) && ok
+      ok := (← assert "hard land z=floorz" (mo.z == hardFloor)) && ok
+      ok := (← assert "hard land deltaviewheight"
+        (pl.deltaviewheight == hardMomz >>> 3)) && ok
+      ok := (← assert "hard land sfx_oof RNG +1"
+        (gs.rng.rndindex == 11)) && ok
+    | _, _ =>
+      ok := (← assert "hard land mo/player" false) && ok
+
+  -- sfx_oof pitch helper: one M_Random; itemup: none --------------------------
+  let rng0 : RandomState := { prndindex := 0, rndindex := 50 }
+  ok := (← assert "sfx_oof pitch draw"
+    ((startSoundPitchRng rng0 sfx_oof).rndindex == 51)) && ok
+  ok := (← assert "sfx_itemup no pitch draw"
+    ((startSoundPitchRng rng0 sfx_itemup).rndindex == 50)) && ok
+
+  -- Airborne calcHeight: final viewz = z + viewheight (C overwrite order) -----
+  let airGs := airborneFixture (-131072) (-196608) (-1048576)
+  match calcHeight airGs 0 false with
+  | Except.error e =>
+    ok := (← assert s!"calcHeight airborne ({e})" false) && ok
+  | Except.ok gs =>
+    match gs.players[0]?, gs.mobjs[0]? with
+    | some pl, some mo =>
+      ok := (← assert "airborne viewz = z+viewheight"
+        (pl.viewz == mo.z + pl.viewheight)) && ok
+    | _, _ =>
+      ok := (← assert "airborne calcHeight player" false) && ok
 
   -- P_Thrust at angle 0: cos=finesine[2048], sin=finesine[0] ----------
   let move : Int32 := 50 * 2048
@@ -118,8 +250,6 @@ def main (_args : List String) : IO UInt32 := do
           (mo.momx == fixedMul move cos90)) && ok
         ok := (← assert "P_Thrust ANG90 momy"
           (mo.momy == fixedMul move sin90)) && ok
-        -- finecosine[2048] == finesine[4096] == -25-ish near -1.0? actually ~0 for cos(90)?
-        -- ANG90>>19 = 2048; cos(90°)=0 approx, sin=1
         ok := (← assert "P_Thrust ANG90 nearly north"
           (mo.momx == 0 || wabs mo.momx < 100)) && ok
   | _, _ =>
