@@ -40,3 +40,7 @@ root = "SpawnTest"
 [[lean_exe]]
 name = "tic0-test"
 root = "Tic0Test"
+
+[[lean_exe]]
+name = "digest-test"
+root = "DigestTest"

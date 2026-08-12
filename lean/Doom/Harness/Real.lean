@@ -1,3 +1,4 @@
+import Doom.Harness.DisplaySim
 import Doom.Harness.TraceFormat
 import Doom.Playsim.Demo
 import Doom.Playsim.GameState
@@ -10,11 +11,14 @@ import Doom.Wad
 /-!
 # Doom.Harness.Real
 
-Load IWAD + DEMO1, spawn E1M5, run N `G_Ticker`s, emit candidate trace.
+Load IWAD + DEMO1, spawn E1M5, run N tics mirroring `D_DoomLoop`:
+bootstrap one `G_Ticker` + emit (tic 0, no display), then for each remaining
+tic: `G_Ticker` + emit + `DisplaySim.onFrame` (wipe check / melt RNG).
 -/
 
 namespace Doom.Harness.Real
 
+open Doom.Harness.DisplaySim
 open Doom.Harness.TraceFormat
 open Doom.Playsim.Demo
 open Doom.Playsim.GameState
@@ -43,9 +47,16 @@ def loadMap (wad : WadDirectory) (label : String) : Except String LevelData := d
 def mapLabel (episode map : UInt8) : String :=
   s!"E{episode}M{map}"
 
+private def runOneTic (gs0 : GameState) (g : Nat) :
+    Except String (GameState × TicRecord) := do
+  let gs := { gs0 with gametic := g.toUInt32 }
+  let gs ← gTicker gs
+  let rec ← emitTicRecord gs
+  pure (gs, rec)
+
 /--
-Spawn from IWAD + demo lump, run `tics` iterations of `G_Ticker`, write
-`pathBase.trc` / `pathBase.dig`.
+Spawn from IWAD + demo lump, run `tics` iterations mirroring `D_DoomLoop`,
+write `pathBase.trc` / `pathBase.dig`.
 -/
 def runReal (iwadPath : System.FilePath) (demoName : String) (tics : Nat)
     (pathBase : System.FilePath) : IO (Except String Unit) := do
@@ -78,19 +89,28 @@ def runReal (iwadPath : System.FilePath) (demoName : String) (tics : Nat)
             gametic := 0
           }
           let mut gs := gs0
+          let mut disp := initDisplay
           let mut records : Array TicRecord := #[]
-          let mut g : Nat := 0
           let mut err : Option String := none
-          while g < tics && err.isNone do
-            gs := { gs with gametic := g.toUInt32 }
-            match gTicker gs with
+          -- Bootstrap: tic 0 via TryRunTics, no display (`D_DoomLoop`).
+          if tics > 0 && err.isNone then
+            match runOneTic gs 0 with
             | Except.error e => err := some e
-            | Except.ok gs1 =>
+            | Except.ok (gs1, rec) =>
               gs := gs1
-              match emitTicRecord gs with
-              | Except.error e => err := some e
-              | Except.ok rec =>
-                records := records.push rec
+              records := records.push rec
+          -- Main loop: remaining tics each followed by display/wipe step.
+          let mut g : Nat := 1
+          while g < tics && err.isNone do
+            match runOneTic gs g with
+            | Except.error e => err := some e
+            | Except.ok (gs1, rec) =>
+              gs := gs1
+              records := records.push rec
+              -- In-level DEMO1: `gamestate == GS_LEVEL` (spawn already loaded).
+              let (disp', rng') := onFrame disp gs.rng gsLevel
+              disp := disp'
+              gs := { gs with rng := rng' }
             g := g + 1
           match err with
           | some e => pure (Except.error e)
