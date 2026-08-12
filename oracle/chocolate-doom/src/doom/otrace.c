@@ -533,7 +533,10 @@ void OTrace_DisableSound(void)
 
 boolean OTrace_Enabled(void)
 {
-    return otrace_active;
+    /* otrace_wanted stays set for the process lifetime once -tracedemo is
+     * seen. Do not use otrace_active: OTrace_Shutdown clears it before
+     * other atexit handlers (e.g. D_Endoom) run. */
+    return otrace_wanted;
 }
 
 boolean OTrace_Init(void)

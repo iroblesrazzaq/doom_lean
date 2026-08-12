@@ -1,5 +1,5 @@
 diff --git a/src/doom/CMakeLists.txt b/src/doom/CMakeLists.txt
-index 6e878a0f..a9794fd8 100644
+index 6e878a0..a9794fd 100644
 --- a/src/doom/CMakeLists.txt
 +++ b/src/doom/CMakeLists.txt
 @@ -29,6 +29,7 @@ add_library(doom STATIC
@@ -11,7 +11,7 @@ index 6e878a0f..a9794fd8 100644
              p_doors.c
              p_enemy.c
 diff --git a/src/doom/d_main.c b/src/doom/d_main.c
-index 014e4872..0351a6b5 100644
+index 014e487..2fdafea 100644
 --- a/src/doom/d_main.c
 +++ b/src/doom/d_main.c
 @@ -73,7 +73,9 @@
@@ -32,7 +32,22 @@ index 014e4872..0351a6b5 100644
      EnableLoadingDisk();
  
      TryRunTics();
-@@ -1302,6 +1305,9 @@ void D_DoomMain (void)
+@@ -1163,10 +1166,12 @@ static void D_Endoom(void)
+ 
+     // Don't show ENDOOM if we have it disabled, or we're running
+     // in screensaver or control test mode. Only show it once the
+-    // game has actually started.
++    // game has actually started. Skip under -tracedemo so exit does
++    // not block waiting for a keypress (dummy SDL has no input).
+ 
+     if (!show_endoom || !main_loop_started
+-     || screensaver_mode || M_CheckParm("-testcontrols") > 0)
++     || screensaver_mode || M_CheckParm("-testcontrols") > 0
++     || OTrace_Enabled())
+     {
+         return;
+     }
+@@ -1302,6 +1307,9 @@ void D_DoomMain (void)
      DEH_printf("Z_Init: Init zone memory allocation daemon. \n");
      Z_Init ();
  
@@ -42,7 +57,7 @@ index 014e4872..0351a6b5 100644
      //!
      // @category net
      //
-@@ -1650,6 +1656,17 @@ void D_DoomMain (void)
+@@ -1650,6 +1658,17 @@ void D_DoomMain (void)
  
      }
  
@@ -60,7 +75,7 @@ index 014e4872..0351a6b5 100644
      if (p)
      {
          char *uc_filename = strdup(myargv[p + 1]);
-@@ -1678,8 +1695,27 @@ void D_DoomMain (void)
+@@ -1678,8 +1697,27 @@ void D_DoomMain (void)
              // If file failed to load, still continue trying to play
              // the demo in the same way as Vanilla Doom.  This makes
              // tricks like "-playdemo demo1" possible.
@@ -89,7 +104,7 @@ index 014e4872..0351a6b5 100644
          }
  
          printf("Playing demo %s.\n", file);
-@@ -1768,6 +1804,7 @@ void D_DoomMain (void)
+@@ -1768,6 +1806,7 @@ void D_DoomMain (void)
      I_CheckIsScreensaver();
      I_InitTimer();
      I_InitJoystick();
@@ -97,7 +112,7 @@ index 014e4872..0351a6b5 100644
      I_InitSound(doom);
      I_InitMusic();
  
-@@ -1975,6 +2012,16 @@ void D_DoomMain (void)
+@@ -1975,6 +2014,16 @@ void D_DoomMain (void)
  	G_DeferedPlayDemo (demolumpname);
  	D_DoomLoop ();  // never returns
      }
@@ -115,7 +130,7 @@ index 014e4872..0351a6b5 100644
      p = M_CheckParmWithArgs("-timedemo", 1);
      if (p)
 diff --git a/src/doom/d_net.c b/src/doom/d_net.c
-index f8969fe0..a553145f 100644
+index f8969fe..a553145 100644
 --- a/src/doom/d_net.c
 +++ b/src/doom/d_net.c
 @@ -35,6 +35,7 @@
@@ -135,7 +150,7 @@ index f8969fe0..a553145f 100644
  
  static loop_interface_t doom_loop_interface = {
 diff --git a/src/doom/d_think.h b/src/doom/d_think.h
-index 0966ad96..9f07b0af 100644
+index 0966ad9..9f07b0a 100644
 --- a/src/doom/d_think.h
 +++ b/src/doom/d_think.h
 @@ -60,6 +60,9 @@ typedef struct thinker_s
@@ -150,10 +165,10 @@ index 0966ad96..9f07b0af 100644
  
 diff --git a/src/doom/otrace.c b/src/doom/otrace.c
 new file mode 100644
-index 00000000..b8c035cd
+index 0000000..a453323
 --- /dev/null
 +++ b/src/doom/otrace.c
-@@ -0,0 +1,798 @@
+@@ -0,0 +1,801 @@
 +// Trace harness writer for Doom Lean verification (TRACE.md v1).
 +
 +#include <errno.h>
@@ -689,7 +704,10 @@ index 00000000..b8c035cd
 +
 +boolean OTrace_Enabled(void)
 +{
-+    return otrace_active;
++    /* otrace_wanted stays set for the process lifetime once -tracedemo is
++     * seen. Do not use otrace_active: OTrace_Shutdown clears it before
++     * other atexit handlers (e.g. D_Endoom) run. */
++    return otrace_wanted;
 +}
 +
 +boolean OTrace_Init(void)
@@ -954,7 +972,7 @@ index 00000000..b8c035cd
 +}
 diff --git a/src/doom/otrace.h b/src/doom/otrace.h
 new file mode 100644
-index 00000000..61a70600
+index 0000000..61a7060
 --- /dev/null
 +++ b/src/doom/otrace.h
 @@ -0,0 +1,31 @@
@@ -990,7 +1008,7 @@ index 00000000..61a70600
 +
 +#endif
 diff --git a/src/doom/p_local.h b/src/doom/p_local.h
-index 41159676..57787cf6 100644
+index 4115967..57787cf 100644
 --- a/src/doom/p_local.h
 +++ b/src/doom/p_local.h
 @@ -64,7 +64,10 @@
@@ -1006,7 +1024,7 @@ index 41159676..57787cf6 100644
  
  void P_InitThinkers (void);
 diff --git a/src/doom/p_setup.c b/src/doom/p_setup.c
-index fbb1a180..e8254d59 100644
+index fbb1a18..e8254d5 100644
 --- a/src/doom/p_setup.c
 +++ b/src/doom/p_setup.c
 @@ -723,6 +723,9 @@ P_SetupLevel
@@ -1020,7 +1038,7 @@ index fbb1a180..e8254d59 100644
      totalkills = totalitems = totalsecret = wminfo.maxfrags = 0;
      wminfo.partime = 180;
 diff --git a/src/doom/p_tick.c b/src/doom/p_tick.c
-index 5a93b80f..6996ad62 100644
+index 5a93b80..6996ad6 100644
 --- a/src/doom/p_tick.c
 +++ b/src/doom/p_tick.c
 @@ -39,6 +39,10 @@ int	leveltime;
@@ -1043,7 +1061,7 @@ index 5a93b80f..6996ad62 100644
      thinker->next = &thinkercap;
      thinker->prev = thinkercap.prev;
 diff --git a/src/i_video.c b/src/i_video.c
-index 6ff3b80e..017375e4 100644
+index 6ff3b80..017375e 100644
 --- a/src/i_video.c
 +++ b/src/i_video.c
 @@ -160,6 +160,9 @@ static boolean nograbmouse_override = false;
@@ -1081,7 +1099,7 @@ index 6ff3b80e..017375e4 100644
      {
          // Zero out the bottom two bits of each channel - the PC VGA
 diff --git a/src/i_video.h b/src/i_video.h
-index d98b8f50..4a0e5c81 100644
+index d98b8f5..4a0e5c8 100644
 --- a/src/i_video.h
 +++ b/src/i_video.h
 @@ -49,6 +49,10 @@ int I_GetPaletteIndex(int r, int g, int b);
