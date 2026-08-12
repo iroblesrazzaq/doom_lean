@@ -3,3 +3,4 @@ import Doom.Harness.TraceFormat
 import Doom.Harness.TraceReader
 import Doom.Harness.Stubs
 import Doom.Playsim
+import Doom.Wad

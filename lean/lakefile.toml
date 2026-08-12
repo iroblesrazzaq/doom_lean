@@ -28,3 +28,7 @@ root = "HarnessTest"
 [[lean_exe]]
 name = "playsim-test"
 root = "PlaysimTest"
+
+[[lean_exe]]
+name = "map-test"
+root = "MapTest"
