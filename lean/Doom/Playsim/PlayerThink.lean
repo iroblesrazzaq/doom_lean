@@ -5,11 +5,12 @@ import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Psprite
 import Doom.Playsim.Tables
+import Doom.Playsim.Think
 
 /-!
 # Doom.Playsim.PlayerThink
 
-`P_CalcHeight`, `P_MovePlayer`, `P_PlayerThink` (tic-0 subset).
+`P_Thrust`, `P_CalcHeight`, `P_MovePlayer`, `P_PlayerThink`.
 -/
 
 namespace Doom.Playsim.PlayerThink
@@ -21,12 +22,33 @@ open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Psprite
 open Doom.Playsim.Tables
+open Doom.Playsim.Think
 
 private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
   if h : i < arr.size then arr.set i v else arr
 
 def MAXBOB : Int32 := 0x100000
-def CF_NOMOMENTUM : Int32 := 8  -- unused at tic 0 but matches calcHeight branch
+def CF_NOMOMENTUM : Int32 := 8
+
+/-- `P_Thrust` — `finecosine = finesine+2048` indexing via `Tables.finecosine`. -/
+def thrust (gs : GameState) (playerIdx : Nat) (angle : UInt32) (move : Int32) :
+    Except String GameState := do
+  match gs.players[playerIdx]? with
+  | none => throw "P_Thrust: bad player"
+  | some player =>
+    match gs.mobjs[player.mo.toNatClampNeg]? with
+    | none => throw "P_Thrust: bad mo"
+    | some mo =>
+      let fineIdx := (angle >>> ANGLETOFINESHIFT.toUInt32) &&& FINEMASK
+      match finecosine[fineIdx.toNat]?, finesine[fineIdx.toNat]? with
+      | some cosv, some sinv =>
+        let mo := {
+          mo with
+          momx := mo.momx + fixedMul move cosv
+          momy := mo.momy + fixedMul move sinv
+        }
+        pure { gs with mobjs := setArr gs.mobjs player.mo.toNatClampNeg mo }
+      | _, _ => throw "P_Thrust: fine table OOB"
 
 /-- `P_CalcHeight`. `onground` threaded explicitly (C uses a file-scope bool). -/
 def calcHeight (gs : GameState) (playerIdx : Nat) (onground : Bool) :
@@ -41,7 +63,7 @@ def calcHeight (gs : GameState) (playerIdx : Nat) (onground : Bool) :
         (fixedMul mo.momx mo.momx + fixedMul mo.momy mo.momy) >>> 2
       let bob1 := if bob0 > MAXBOB then MAXBOB else bob0
       if (player0.cheats &&& CF_NOMOMENTUM) != 0 || !onground then
-        throw "P_CalcHeight: nomomentum / airborne path unexpected at tic 0"
+        throw "P_CalcHeight: nomomentum / airborne path unexpected before Z movement"
       let angle :=
         ((FINEANGLES.toUInt32 / 20 * gs.leveltime) &&& FINEMASK)
       let fine ←
@@ -68,27 +90,67 @@ def calcHeight (gs : GameState) (playerIdx : Nat) (onground : Bool) :
       player := { player with viewz }
       pure { gs with players := setArr gs.players playerIdx player }
 
-/-- `P_MovePlayer` — zero cmd at tic 0: only sets onground. -/
-def movePlayer (gs : GameState) (playerIdx : Nat) : Except String (GameState × Bool) := do
-  match gs.players[playerIdx]? with
+/-- `P_MovePlayer`. -/
+def movePlayer (gs0 : GameState) (playerIdx : Nat) : Except String (GameState × Bool) := do
+  match gs0.players[playerIdx]? with
   | none => throw "P_MovePlayer: bad player"
   | some player =>
-    match gs.mobjs[player.mo.toNatClampNeg]? with
+    match gs0.mobjs[player.mo.toNatClampNeg]? with
     | none => throw "P_MovePlayer: bad mo"
-    | some mo =>
+    | some mo0 =>
       let cmd := player.cmd
-      -- angleturn << FRACBITS; zero at tic 0
       let mo :=
-        if cmd.angleturn != 0 then
-          { mo with angle := mo.angle + (cmd.angleturn.toUInt32 <<< 16) }
-        else mo
-      let gs := { gs with mobjs := setArr gs.mobjs player.mo.toNatClampNeg mo }
+        { mo0 with angle := mo0.angle + (cmd.angleturn.toUInt32 <<< 16) }
+      let mut gs := { gs0 with mobjs := setArr gs0.mobjs player.mo.toNatClampNeg mo }
       let onground := mo.z <= mo.floorz
-      if cmd.forwardmove != 0 || cmd.sidemove != 0 then
-        throw "P_MovePlayer: thrust not implemented (non-zero cmd)"
+      if cmd.forwardmove != 0 && onground then
+        gs ← thrust gs playerIdx mo.angle (cmd.forwardmove * 2048)
+      if cmd.sidemove != 0 && onground then
+        match gs.mobjs[player.mo.toNatClampNeg]? with
+        | none => throw "P_MovePlayer: lost mo before side thrust"
+        | some mo1 =>
+          gs ← thrust gs playerIdx (mo1.angle - ANG90) (cmd.sidemove * 2048)
+      if (cmd.forwardmove != 0 || cmd.sidemove != 0) then
+        match gs.mobjs[player.mo.toNatClampNeg]? with
+        | none => throw "P_MovePlayer: lost mo before run state"
+        | some mo2 =>
+          if mo2.state == S_PLAY then
+            let (gs1, _) ← setMobjState gs player.mo.toNatClampNeg S_PLAY_RUN1
+            gs := gs1
       pure (gs, onground)
 
-/-- `P_PlayerThink` (live, zero powers/counters, pendingweapon == wp_nochange). -/
+/--
+`P_PlayerInSpecialSector` open subset: early-out when not on sector floor;
+nukage/slime damage gated by `leveltime&0x1f` (no-op when non-zero); other
+specials / actual damage are loud-errors.
+-/
+def playerInSpecialSector (gs : GameState) (playerIdx : Nat)
+    (sec : SectorRuntime) : Except String GameState := do
+  match gs.players[playerIdx]? with
+  | none => throw "P_PlayerInSpecialSector: bad player"
+  | some player =>
+    match gs.mobjs[player.mo.toNatClampNeg]? with
+    | none => throw "P_PlayerInSpecialSector: bad mo"
+    | some mo =>
+      -- Falling, not all the way down yet?
+      if mo.z != sec.floorheight then
+        return gs
+      -- `pw_ironfeet` = 3
+      let ironfeet := match player.powers[3]? with | some v => v | none => (0 : Int32)
+      if sec.special == 5 || sec.special == 7 then
+        if ironfeet == 0 && (gs.leveltime &&& (0x1f : UInt32)) == 0 then
+          throw s!"P_PlayerInSpecialSector: damage special={sec.special}"
+        pure gs
+      else if sec.special == 4 || sec.special == 16 then
+        throw s!"P_PlayerInSpecialSector: strobe/super slime special={sec.special}"
+      else if sec.special == 9 then
+        throw "P_PlayerInSpecialSector: secret sector not implemented"
+      else if sec.special == 11 then
+        throw "P_PlayerInSpecialSector: exit super damage not implemented"
+      else
+        throw s!"P_PlayerInSpecialSector: unknown special {sec.special}"
+
+/-- `P_PlayerThink` (live, pendingweapon == wp_nochange). -/
 def playerThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState := do
   match gs0.players[playerIdx]? with
   | none => throw "P_PlayerThink: bad player"
@@ -122,13 +184,12 @@ def playerThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState :=
             | none => throw "P_PlayerThink: bad sector"
             | some sec =>
               if sec.special != 0 then
-                throw s!"P_PlayerThink: P_PlayerInSpecialSector special={sec.special}"
+                gs ← playerInSpecialSector gs playerIdx sec
           let cmd := player.cmd
-          if (cmd.buttons &&& 128) != 0 then  -- BT_SPECIAL approx — unused at tic 0
+          if (cmd.buttons &&& 128) != 0 then  -- BT_SPECIAL approx — unused early
             pure ()
           if (cmd.buttons &&& 4) != 0 then  -- BT_CHANGE
             throw "P_PlayerThink: weapon change not implemented"
-          -- pendingweapon stays wp_nochange → no bring-up
           if player.pendingweapon != wp_nochange then
             throw "P_PlayerThink: pendingweapon != wp_nochange unexpected"
           if (cmd.buttons &&& 2) != 0 then  -- BT_USE
@@ -137,7 +198,6 @@ def playerThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState :=
             match movePsprites player with
             | Except.error e => throw e
             | Except.ok p2 => pure { gs with players := setArr gs.players playerIdx p2 }
-          -- power / damage / bonus counters: all zero → no-ops
           pure gs
 
 end Doom.Playsim.PlayerThink

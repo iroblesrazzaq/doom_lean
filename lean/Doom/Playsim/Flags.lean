@@ -13,8 +13,17 @@ def MF_NOSECTOR : UInt32 := 8
 def MF_NOBLOCKMAP : UInt32 := 16
 def MF_AMBUSH : UInt32 := 32
 def MF_SPAWNCEILING : UInt32 := 256
+def MF_NOGRAVITY : UInt32 := 512
+def MF_DROPOFF : UInt32 := 0x400
+def MF_PICKUP : UInt32 := 0x800
+def MF_NOCLIP : UInt32 := 0x1000
+def MF_FLOAT : UInt32 := 0x4000
+def MF_TELEPORT : UInt32 := 0x8000
+def MF_MISSILE : UInt32 := 0x10000
+def MF_CORPSE : UInt32 := 0x100000
 def MF_COUNTKILL : UInt32 := 0x400000
 def MF_COUNTITEM : UInt32 := 0x800000
+def MF_SKULLFLY : UInt32 := 0x1000000
 def MF_NOTDMATCH : UInt32 := 0x2000000
 def MF_TRANSLATION : UInt32 := 0xc000000
 /-- Shift amount for player color translation (`MF_TRANSSHIFT`). -/

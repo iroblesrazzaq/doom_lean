@@ -103,6 +103,8 @@ structure GameState where
   validcount : Int32
   /-- Per-linedef `line_t::validcount` stamp. -/
   lineValidcount : Array Int32
+  /-- Blockmap thing chains (`blocklinks`); `-1` = empty. Size `width*height`. -/
+  blocklinks : Array Int32
 
 def mkSectorRuntime (s : Sector) : SectorRuntime := {
   lightlevel := s.lightlevel
@@ -120,6 +122,8 @@ def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool
     (consoleplayer : Nat) : GameState :=
   let sectors := level.sectors.map mkSectorRuntime
   let players := Array.replicate MAXPLAYERS Player.empty
+  let bmapCells :=
+    (level.blockmap.width * level.blockmap.height).toNatClampNeg
   { level
     sectors
     players
@@ -147,6 +151,7 @@ def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool
     totalsecret := 0
     validcount := 0
     lineValidcount := Array.replicate level.lines.size (0 : Int32)
+    blocklinks := Array.replicate bmapCells (-1 : Int32)
   }
 
 /-- Proof-free array set. -/

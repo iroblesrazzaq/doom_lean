@@ -37,6 +37,9 @@ structure Mobj where
   /-- Sector thinglist links (`-1` = NULL). -/
   snext : Int32
   sprev : Int32
+  /-- Blockmap thing chain links (`-1` = NULL). -/
+  bnext : Int32
+  bprev : Int32
   /-- Owning player index, or `-1`. -/
   player : Int32
   deriving Repr
@@ -50,7 +53,7 @@ def empty : Mobj := {
   health := 0, flags := 0, radius := 0, height := 0
   reactiontime := 0, lastlook := 0, threshold := 0, target := -1
   floorz := 0, ceilingz := 0, subsector := 0
-  snext := -1, sprev := -1, player := -1
+  snext := -1, sprev := -1, bnext := -1, bprev := -1, player := -1
 }
 
 end Doom.Playsim.Mobj

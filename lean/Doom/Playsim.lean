@@ -11,6 +11,8 @@ import Doom.Playsim.Player
 import Doom.Playsim.GameState
 import Doom.Playsim.Bsp
 import Doom.Playsim.Demo
+import Doom.Playsim.MapUtil
+import Doom.Playsim.Map
 import Doom.Playsim.Spawn
 import Doom.Playsim.Weapons
 import Doom.Playsim.Psprite

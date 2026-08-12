@@ -44,3 +44,7 @@ root = "Tic0Test"
 [[lean_exe]]
 name = "digest-test"
 root = "DigestTest"
+
+[[lean_exe]]
+name = "movement-test"
+root = "MovementTest"

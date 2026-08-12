@@ -4,6 +4,7 @@ import Doom.Playsim.Flags
 import Doom.Playsim.GameState
 import Doom.Playsim.Info
 import Doom.Playsim.Level
+import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Psprite
@@ -15,9 +16,6 @@ import Doom.Playsim.Thinker
 
 Level spawn path: `P_SpawnMobj` / `P_SpawnMapThing` / `P_SpawnPlayer` /
 `P_SpawnSpecials`, matching oracle call order and RNG draws.
-
-Blockmap links are intentionally stubbed (sector thinglist is linked); documented
-here for P2a follow-ups.
 -/
 
 namespace Doom.Playsim.Spawn
@@ -28,6 +26,7 @@ open Doom.Playsim.Flags
 open Doom.Playsim.GameState
 open Doom.Playsim.Info
 open Doom.Playsim.Level
+open Doom.Playsim.MapUtil
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Psprite
@@ -116,35 +115,10 @@ def findMinSurroundingLight (gs : GameState) (secIdx : Nat) (maxLight : Int32) :
       pure minL
 
 /--
-`P_SetThingPosition`: set subsector + sector thinglist link.
-Blockmap links are data-only stubs (not maintained) for P2a-i.
+`P_SetThingPosition` (delegates to `MapUtil` — sector + blockmap links).
 -/
-def setThingPosition (gs : GameState) (mobjIdx : Nat) : Except String GameState := do
-  match gs.mobjs[mobjIdx]? with
-  | none => throw "setThingPosition: bad mobj"
-  | some mo0 =>
-    let ssIdx ← pointInSubsector gs.level mo0.x mo0.y
-    match gs.level.subsectors[ssIdx.toNat]? with
-    | none => throw "setThingPosition: bad subsector"
-    | some ss =>
-      let mut mo := { mo0 with subsector := ssIdx }
-      let mut sectors := gs.sectors
-      let mut mobjs := gs.mobjs
-      if (mo.flags &&& MF_NOSECTOR) == 0 then
-        let secIdx := ss.sector.toNat
-        match sectors[secIdx]? with
-        | none => throw "setThingPosition: bad sector"
-        | some sec =>
-          let head := sec.thinglist
-          mo := { mo with sprev := -1, snext := head }
-          if head >= 0 then
-            match mobjs[idx head]? with
-            | none => throw "setThingPosition: bad thinglist head"
-            | some headMo =>
-              mobjs := setArr mobjs (idx head) { headMo with sprev := mobjIdx.toInt32 }
-          sectors := setArr sectors secIdx { sec with thinglist := mobjIdx.toInt32 }
-      mobjs := setArr mobjs mobjIdx mo
-      pure { gs with mobjs, sectors }
+def setThingPosition (gs : GameState) (mobjIdx : Nat) : Except String GameState :=
+  MapUtil.setThingPosition gs mobjIdx
 
 /-- `P_SpawnMobj` — does **not** invoke state action routines. -/
 def spawnMobj (gs0 : GameState) (x y z : Int32) (typeId : Int32) :

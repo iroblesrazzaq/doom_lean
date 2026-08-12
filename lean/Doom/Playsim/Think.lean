@@ -1,6 +1,8 @@
 import Doom.Playsim.Flags
+import Doom.Playsim.Fixed
 import Doom.Playsim.GameState
 import Doom.Playsim.Info
+import Doom.Playsim.Map
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
@@ -16,13 +18,24 @@ import Doom.Playsim.Thinker
 namespace Doom.Playsim.Think
 
 open Doom.Playsim.Flags
+open Doom.Playsim.Fixed
 open Doom.Playsim.GameState
 open Doom.Playsim.Info
+open Doom.Playsim.Map
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sight
 open Doom.Playsim.Thinker
+
+/-- `statenum_t` player idle / run. -/
+def S_PLAY : UInt32 := 149
+def S_PLAY_RUN1 : UInt32 := 150
+
+def STOPSPEED : Int32 := 0x1000
+def FRICTION : Int32 := 0xe800
+/-- `CF_NOMOMENTUM` cheat bit (`p_user.c` / `p_local.h`). -/
+def CF_NOMOMENTUM : Int32 := 8
 
 private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
   if h : i < arr.size then arr.set i v else arr
@@ -171,32 +184,140 @@ def setMobjState (gs0 : GameState) (mobjIdx : Nat) (state0 : UInt32) :
           state := st.nextstate
   throw "P_SetMobjState: cycle limit"
 
-/-- `P_MobjThinker` — zero-momentum / on-floor skip; cycle states. -/
+/-- `P_XYMovement` (`p_mobj.c`). Player slide is a loud-error (not before tic 27). -/
+def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "P_XYMovement: bad mobj"
+  | some mo0 =>
+    if mo0.momx == 0 && mo0.momy == 0 then
+      if (mo0.flags &&& MF_SKULLFLY) != 0 then
+        throw "P_XYMovement: skullfly zero-mom path not implemented"
+      return gs0
+    let mut gs := gs0
+    let mut mo := mo0
+    let momx :=
+      if mo.momx > MAXMOVE then MAXMOVE
+      else if mo.momx < -MAXMOVE then -MAXMOVE
+      else mo.momx
+    let momy :=
+      if mo.momy > MAXMOVE then MAXMOVE
+      else if mo.momy < -MAXMOVE then -MAXMOVE
+      else mo.momy
+    mo := { mo with momx, momy }
+    gs := setMo gs mobjIdx mo
+    let mut xmove := momx
+    let mut ymove := momy
+    let mut guard : Nat := 8
+    while (xmove != 0 || ymove != 0) && guard > 0 do
+      guard := guard - 1
+      match gs.mobjs[mobjIdx]? with
+      | none => throw "P_XYMovement: lost mobj"
+      | some moCur =>
+        let (ptryx, ptryy, xmove', ymove') :=
+          if xmove > MAXMOVE / 2 || ymove > MAXMOVE / 2 then
+            (moCur.x + xmove / 2, moCur.y + ymove / 2, xmove >>> 1, ymove >>> 1)
+          else
+            (moCur.x + xmove, moCur.y + ymove, (0 : Int32), (0 : Int32))
+        xmove := xmove'
+        ymove := ymove'
+        let (gs1, ok) ← tryMove gs mobjIdx ptryx ptryy
+        gs := gs1
+        if !ok then
+          match gs.mobjs[mobjIdx]? with
+          | none => throw "P_XYMovement: lost after blocked"
+          | some moB =>
+            if moB.player >= 0 then
+              throw "P_XYMovement: slide not implemented"
+            else if (moB.flags &&& MF_MISSILE) != 0 then
+              throw "P_XYMovement: missile explode not implemented"
+            else
+              gs := setMo gs mobjIdx { moB with momx := 0, momy := 0 }
+              xmove := 0
+              ymove := 0
+    match gs.mobjs[mobjIdx]? with
+    | none => throw "P_XYMovement: lost before friction"
+    | some moF =>
+      let player? : Option Player :=
+        if moF.player >= 0 then gs.players[moF.player.toNatClampNeg]? else none
+      match player? with
+      | some player =>
+        if (player.cheats &&& CF_NOMOMENTUM) != 0 then
+          return setMo gs mobjIdx { moF with momx := 0, momy := 0 }
+      | none => pure ()
+      if (moF.flags &&& (MF_MISSILE ||| MF_SKULLFLY)) != 0 then
+        return gs
+      if moF.z > moF.floorz then
+        return gs
+      if (moF.flags &&& MF_CORPSE) != 0 then
+        if moF.momx > FRACUNIT / 4 || moF.momx < -(FRACUNIT / 4) ||
+            moF.momy > FRACUNIT / 4 || moF.momy < -(FRACUNIT / 4) then
+          match gs.level.subsectors[moF.subsector.toNat]? with
+          | none => throw "P_XYMovement: corpse bad subsector"
+          | some ss =>
+            match gs.sectors[ss.sector.toNat]? with
+            | none => throw "P_XYMovement: corpse bad sector"
+            | some sec =>
+              if moF.floorz != sec.floorheight then
+                return gs
+      let cmdIdle :=
+        match player? with
+        | none => true
+        | some player => player.cmd.forwardmove == 0 && player.cmd.sidemove == 0
+      if moF.momx > -STOPSPEED && moF.momx < STOPSPEED &&
+          moF.momy > -STOPSPEED && moF.momy < STOPSPEED && cmdIdle then
+        let mut gs2 := gs
+        match player? with
+        | some _player =>
+          -- walking frame stop: (state - S_PLAY_RUN1) < 4
+          if moF.state >= S_PLAY_RUN1 && moF.state < S_PLAY_RUN1 + 4 then
+            let (gs3, _) ← setMobjState gs2 mobjIdx S_PLAY
+            gs2 := gs3
+        | none => pure ()
+        match gs2.mobjs[mobjIdx]? with
+        | none => throw "P_XYMovement: lost on stop"
+        | some moS =>
+          pure (setMo gs2 mobjIdx { moS with momx := 0, momy := 0 })
+      else
+        pure (setMo gs mobjIdx {
+          moF with
+          momx := fixedMul moF.momx FRICTION
+          momy := fixedMul moF.momy FRICTION
+        })
+
+/-- `P_MobjThinker` — XY movement; Z deferred as documented no-op until P_ZMovement. -/
 def mobjThinker (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
   match gs0.mobjs[mobjIdx]? with
   | none => throw "P_MobjThinker: bad mobj"
   | some mo =>
-    if mo.momx != 0 || mo.momy != 0 then
-      throw "P_MobjThinker: XY movement not implemented"
-    if mo.z != mo.floorz || mo.momz != 0 then
-      throw "P_MobjThinker: Z movement not implemented"
-    if mo.tics != -1 then
-      let tics := mo.tics - 1
-      let gs := setMo gs0 mobjIdx { mo with tics }
-      if tics == 0 then
-        match gs.mobjs[mobjIdx]? with
-        | none => throw "P_MobjThinker: lost"
-        | some mo2 =>
-          match states[mo2.state.toNat]? with
-          | none => throw "P_MobjThinker: bad state"
-          | some st =>
-            let (gs2, _) ← setMobjState gs mobjIdx st.nextstate
-            pure gs2
+    let mut gs := gs0
+    if mo.momx != 0 || mo.momy != 0 || (mo.flags &&& MF_SKULLFLY) != 0 then
+      gs ← xyMovement gs mobjIdx
+      match gs.mobjs[mobjIdx]? with
+      | none => return gs  -- removed (not expected)
+      | some _ => pure ()
+    match gs.mobjs[mobjIdx]? with
+    | none => return gs
+    | some mo2 =>
+      -- P_ZMovement deferred: no-op so DEMO1 can emit divergent tic-27 momz.
+      if mo2.z != mo2.floorz || mo2.momz != 0 then
+        pure ()
+      if mo2.tics != -1 then
+        let tics := mo2.tics - 1
+        gs := setMo gs mobjIdx { mo2 with tics }
+        if tics == 0 then
+          match gs.mobjs[mobjIdx]? with
+          | none => throw "P_MobjThinker: lost"
+          | some mo3 =>
+            match states[mo3.state.toNat]? with
+            | none => throw "P_MobjThinker: bad state"
+            | some st =>
+              let (gs2, _) ← setMobjState gs mobjIdx st.nextstate
+              pure gs2
+        else
+          pure gs
       else
+        -- nightmare respawn path unused
         pure gs
-    else
-      -- nightmare respawn path unused
-      pure gs0
 
 /-- `T_LightFlash`. -/
 def lightFlashThinker (gs0 : GameState) (payload : Nat) : Except String GameState := do
