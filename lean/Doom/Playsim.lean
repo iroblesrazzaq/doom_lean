@@ -12,6 +12,13 @@ import Doom.Playsim.GameState
 import Doom.Playsim.Bsp
 import Doom.Playsim.Demo
 import Doom.Playsim.Spawn
+import Doom.Playsim.Weapons
+import Doom.Playsim.Psprite
+import Doom.Playsim.Sight
+import Doom.Playsim.Think
+import Doom.Playsim.PlayerThink
+import Doom.Playsim.Tick
+import Doom.Playsim.TraceEmit
 
 /-!
 # Doom.Playsim

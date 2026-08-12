@@ -1,23 +1,26 @@
 import Doom.Harness.Stubs
+import Doom.Harness.Real
 
 /-!
 # verify
 
-Future entry point for the Doom Lean verification harness.
+Doom Lean verification harness.
 
 Resolves `tools/tracediff` relative to `--root`. Default `--root` is the parent of the
 current working directory when the cwd's last component is `lean`, otherwise the cwd itself.
 -/
 
 open Doom.Harness.Stubs
+open Doom.Harness.Real
 
 private def usage : String :=
-  "usage: verify --iwad PATH --demo NAME --ref-digest REF.dig --impl (stub-zero|stub-drift) " ++
+  "usage: verify --iwad PATH --demo NAME --ref-digest REF.dig --impl (stub-zero|stub-drift|real) " ++
   "--out-dir DIR [--tics N] [--ref-trace REF.trc] [--root ROOT]"
 
 inductive ImplKind where
   | stubZero
   | stubDrift
+  | real
   deriving BEq, Repr
 
 structure VerifyArgs where
@@ -35,13 +38,13 @@ private def parseImpl (s : String) : Except String ImplKind :=
   match s with
   | "stub-zero" => Except.ok .stubZero
   | "stub-drift" => Except.ok .stubDrift
-  | _ => Except.error s!"unknown --impl {s} (expected stub-zero|stub-drift)"
+  | "real" => Except.ok .real
+  | _ => Except.error s!"unknown --impl {s} (expected stub-zero|stub-drift|real)"
 
 private def parseArgs (args : List String) : Except String VerifyArgs :=
   let rec go (rest : List String) (acc : VerifyArgs) : Except String VerifyArgs :=
     match rest with
     | [] =>
-      -- Required fields validated by sentinel empty strings / paths.
       if acc.iwad.toString == "" then Except.error "missing --iwad PATH"
       else if acc.demo == "" then Except.error "missing --demo NAME"
       else if acc.refDigest.toString == "" then Except.error "missing --ref-digest REF.dig"
@@ -125,6 +128,18 @@ def main (args : List String) : IO UInt32 := do
             return 1
           | Except.ok tid =>
             IO.println s!"perturbed trace_id={tid} at tic 500"
+      | .real =>
+        match va.tics with
+        | none => do
+          IO.eprintln "real impl requires --tics N"
+          return 2
+        | some n => do
+          match ← runReal va.iwad va.demo n candBase with
+          | Except.error e => do
+            IO.eprintln e
+            return 1
+          | Except.ok () =>
+            IO.println s!"real: wrote {n} tic(s) to {candBase}"
       let tracediff := root / "tools" / "tracediff"
       let mut diffArgs : Array String := #[
         tracediff.toString,

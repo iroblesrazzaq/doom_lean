@@ -13,6 +13,9 @@ structure Mobj where
   x : Int32
   y : Int32
   z : Int32
+  momx : Int32
+  momy : Int32
+  momz : Int32
   angle : UInt32
   sprite : UInt32
   frame : UInt32
@@ -24,6 +27,9 @@ structure Mobj where
   height : Int32
   reactiontime : Int32
   lastlook : Int32
+  threshold : Int32
+  /-- Target mobj index, or `-1`. -/
+  target : Int32
   floorz : Int32
   ceilingz : Int32
   /-- Subsector index. -/
@@ -37,10 +43,12 @@ structure Mobj where
 
 def empty : Mobj := {
   traceId := 0, typeId := 0
-  x := 0, y := 0, z := 0, angle := 0
+  x := 0, y := 0, z := 0
+  momx := 0, momy := 0, momz := 0
+  angle := 0
   sprite := 0, frame := 0, tics := 0, state := 0
   health := 0, flags := 0, radius := 0, height := 0
-  reactiontime := 0, lastlook := 0
+  reactiontime := 0, lastlook := 0, threshold := 0, target := -1
   floorz := 0, ceilingz := 0, subsector := 0
   snext := -1, sprev := -1, player := -1
 }

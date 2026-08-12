@@ -246,6 +246,8 @@ def main (_args : List String) : IO UInt32 := do
               ok := (← assert "pendingweapon wp_nochange"
                 (p.pendingweapon == wp_nochange && p.pendingweapon == 10)) && ok
               ok := (← assert "player health" (p.health == 100)) && ok
+              ok := (← assert "viewz after reborn" (p.viewz == 0)) && ok
+              ok := (← assert "viewheight VIEWHEIGHT" (p.viewheight == VIEWHEIGHT)) && ok
               ok := (← assert "ammo"
                 (p.ammo == #[(50 : Int32), 0, 0, 0])) && ok
               ok := (← assert "weaponowned fist+pistol"

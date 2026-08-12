@@ -1,10 +1,14 @@
+import Doom.Playsim.Player
+
 /-!
 # Doom.Playsim.Demo
 
-Vanilla Doom 1.9 demo header parse (`G_DoPlayDemo`).
+Vanilla Doom 1.9 demo header parse (`G_DoPlayDemo`) and ticcmd stream read.
 -/
 
 namespace Doom.Playsim.Demo
+
+open Doom.Playsim.Player
 
 structure DemoHeader where
   version : UInt8
@@ -45,5 +49,37 @@ def parseHeader (data : ByteArray) : Except String DemoHeader := do
     deathmatch, respawn, fast, nomonsters, consoleplayer
     playeringame := #[p0 != 0, p1 != 0, p2 != 0, p3 != 0]
   }
+
+/-- Demo stream end marker. -/
+def DEMOMARKER : UInt8 := 0x80
+
+/-- Sign-extend an 8-bit value to `Int32` (C `signed char` widen). -/
+def signExtendI8 (b : UInt8) : Int32 :=
+  let u := b.toUInt32
+  let bits := if u >= 128 then u ||| (0xffffff00 : UInt32) else u
+  bits.toInt32
+
+/--
+`G_ReadDemoTiccmd` (shorttics): four bytes after the 13-byte header.
+`angleturn = ((unsigned char)<<8)` stored as Int32 bit pattern.
+-/
+def readDemoTiccmd (data : ByteArray) (cursor : Nat) :
+    Except String (Nat × TicCmd) := do
+  if cursor >= data.size then
+    throw "G_ReadDemoTiccmd: demo EOF"
+  let get (i : Nat) : Except String UInt8 :=
+    if h : i < data.size then pure (data.get i h) else throw "G_ReadDemoTiccmd: truncated ticcmd"
+  let b0 ← get cursor
+  if b0 == DEMOMARKER then
+    throw "G_ReadDemoTiccmd: DEMOMARKER (demo end)"
+  let b1 ← get (cursor + 1)
+  let b2 ← get (cursor + 2)
+  let b3 ← get (cursor + 3)
+  pure (cursor + 4, {
+    forwardmove := signExtendI8 b0
+    sidemove := signExtendI8 b1
+    angleturn := (b2.toUInt32 <<< 8).toInt32
+    buttons := b3.toUInt32
+  })
 
 end Doom.Playsim.Demo

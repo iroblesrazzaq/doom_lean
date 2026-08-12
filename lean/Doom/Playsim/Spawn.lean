@@ -6,6 +6,7 @@ import Doom.Playsim.Info
 import Doom.Playsim.Level
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
+import Doom.Playsim.Psprite
 import Doom.Playsim.Random
 import Doom.Playsim.Thinker
 
@@ -29,6 +30,7 @@ open Doom.Playsim.Info
 open Doom.Playsim.Level
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
+open Doom.Playsim.Psprite
 open Doom.Playsim.Random
 open Doom.Playsim.Thinker
 
@@ -203,13 +205,6 @@ def spawnMobj (gs0 : GameState) (x y z : Int32) (typeId : Int32) :
               let mo5 := { mo4 with traceId := tid }
               pure ({ gs4 with mobjs := setArr gs4.mobjs mobjIdx mo5 }, mobjIdx)
 
-/-- Minimal `P_BringUpWeapon`: set `pendingweapon = wp_nochange`. -/
-def bringUpWeapon (p : Player) : Player :=
-  { p with pendingweapon := wp_nochange }
-
-def setupPsprites (p : Player) : Player :=
-  bringUpWeapon { p with pendingweapon := p.readyweapon }
-
 /-- `P_SpawnPlayer`. -/
 def spawnPlayer (gs0 : GameState) (mthing : Thing) : Except String GameState := do
   if mthing.typeId == 0 then
@@ -236,13 +231,13 @@ def spawnPlayer (gs0 : GameState) (mthing : Thing) : Except String GameState := 
           else
             mo.flags
         let mo' := { mo with angle, flags, player := pnum.toInt32, health := p1.health }
-        let p2 := setupPsprites {
+        -- C: `P_SpawnPlayer` sets `viewheight` only; `viewz` stays 0 from `G_PlayerReborn` memset.
+        let p2 ← setupPsprites {
           p1 with
           mo := mobjIdx.toInt32
           playerstate := PST_LIVE
           refire := 0
           viewheight := VIEWHEIGHT
-          viewz := 1
         }
         pure {
           gs2 with

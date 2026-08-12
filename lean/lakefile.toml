@@ -36,3 +36,7 @@ root = "MapTest"
 [[lean_exe]]
 name = "spawn-test"
 root = "SpawnTest"
+
+[[lean_exe]]
+name = "tic0-test"
+root = "Tic0Test"

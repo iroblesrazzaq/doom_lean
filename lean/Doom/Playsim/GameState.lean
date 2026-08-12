@@ -38,6 +38,8 @@ structure SectorRuntime where
   thinglist : Int32
   /-- Attached special thinker payload index, or `-1` (unused at P2a-i spawn beyond clear). -/
   specialdata : Int32
+  /-- Sector `soundtarget` mobj index, or `-1`. -/
+  soundtarget : Int32
   /-- Line indices (copied from geometry). -/
   lines : Array UInt32
   deriving Repr
@@ -81,6 +83,12 @@ structure GameState where
   /-- Next trace id to assign (`P_AddThinker`); reset to 1 at level load. -/
   traceIdCounter : UInt32
   leveltime : UInt32
+  /-- Current gametic at dump point (not advanced inside `G_Ticker`). -/
+  gametic : UInt32
+  /-- Demo lump bytes (header + cmds); cursor indexes next cmd byte. -/
+  demoBytes : ByteArray
+  demoCursor : Nat
+  demoplayback : Bool
   gameskill : Int32
   consoleplayer : Nat
   deathmatch : Bool
@@ -100,6 +108,7 @@ def mkSectorRuntime (s : Sector) : SectorRuntime := {
   ceilingheight := s.ceilingheight
   thinglist := -1
   specialdata := -1
+  soundtarget := -1
   lines := s.lines
 }
 
@@ -119,6 +128,10 @@ def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool
     rng := clearRandom
     traceIdCounter := 1
     leveltime := 0
+    gametic := 0
+    demoBytes := ByteArray.empty
+    demoCursor := 0
+    demoplayback := false
     gameskill := skill
     consoleplayer
     deathmatch := false
