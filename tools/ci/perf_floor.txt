@@ -1,0 +1,4 @@
+# Provisional milestone-0 floor for the Lean playsim (tics_per_second).
+# Recalibrate when the real port lands. The failure mode this guards is
+# accidental Array copy-on-write turning O(1) updates into O(n).
+10000

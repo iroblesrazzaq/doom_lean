@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Framebuffer dump checker for Doom renderer gate.
+
+Usage:
+  fbcheck REF_DIR CAND_DIR
+
+Compares every fb_<tic>.ppm and fb_<tic>.fnv present in REF_DIR against CAND_DIR.
+
+- PPM files must be byte-identical.
+- .fnv files must match each other (same text content).
+- Missing file on either side is a failure.
+
+Note on FNV recomputation: TRACE.md §9 defines the .fnv as FNV-1a64 over
+(64000 framebuffer *index* bytes || 768 raw PLAYPAL bytes). The PPM stores
+palette-mapped RGB, so the index bytes cannot be recovered from the PPM alone.
+This tool therefore verifies that paired .fnv files match and that PPMs match
+byte-for-byte; it does not recompute FNV from the PPM.
+
+Exit codes:
+  0  all present pairs match
+  1  mismatch or missing file
+  2  usage error
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from typing import Optional, Sequence, Set, Tuple
+
+EXIT_OK = 0
+EXIT_DIFF = 1
+EXIT_ERROR = 2
+
+FB_PPM_RE = re.compile(r"^fb_(\d+)\.ppm$")
+FB_FNV_RE = re.compile(r"^fb_(\d+)\.fnv$")
+
+
+def list_fb_tics(directory: str) -> Tuple[Set[int], Set[int]]:
+    """Return (ppm_tics, fnv_tics) found in *directory*."""
+    ppm: Set[int] = set()
+    fnv: Set[int] = set()
+    try:
+        names = os.listdir(directory)
+    except OSError as e:
+        raise SystemExit(f"error: cannot list {directory}: {e}") from e
+    for name in names:
+        m = FB_PPM_RE.match(name)
+        if m:
+            ppm.add(int(m.group(1)))
+            continue
+        m = FB_FNV_RE.match(name)
+        if m:
+            fnv.add(int(m.group(1)))
+    return ppm, fnv
+
+
+def usage_error(msg: str) -> int:
+    print(f"error: {msg}", file=sys.stderr)
+    print("usage: fbcheck REF_DIR CAND_DIR", file=sys.stderr)
+    return EXIT_ERROR
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="fbcheck",
+        description="Compare Doom framebuffer dump directories (PPM + FNV).",
+    )
+    parser.add_argument("ref_dir", help="Reference framebuffer directory")
+    parser.add_argument("cand_dir", help="Candidate framebuffer directory")
+    args = parser.parse_args(argv)
+
+    if not os.path.isdir(args.ref_dir):
+        return usage_error(f"not a directory: {args.ref_dir}")
+    if not os.path.isdir(args.cand_dir):
+        return usage_error(f"not a directory: {args.cand_dir}")
+
+    ref_ppm, ref_fnv = list_fb_tics(args.ref_dir)
+    cand_ppm, cand_fnv = list_fb_tics(args.cand_dir)
+
+    ref_tics = ref_ppm | ref_fnv
+    cand_tics = cand_ppm | cand_fnv
+
+    if not ref_tics and not cand_tics:
+        print("error: no fb_<tic>.ppm / fb_<tic>.fnv files in either directory")
+        return EXIT_DIFF
+
+    failed = False
+
+    # Every tic that appears on either side must have both .ppm and .fnv on both sides.
+    all_tics = sorted(ref_tics | cand_tics)
+    for tic in all_tics:
+        for kind, ref_set, cand_set, ext in (
+            ("ppm", ref_ppm, cand_ppm, "ppm"),
+            ("fnv", ref_fnv, cand_fnv, "fnv"),
+        ):
+            rpath = os.path.join(args.ref_dir, f"fb_{tic}.{ext}")
+            cpath = os.path.join(args.cand_dir, f"fb_{tic}.{ext}")
+            if tic not in ref_set:
+                print(f"MISSING in ref:  {rpath}")
+                failed = True
+            if tic not in cand_set:
+                print(f"MISSING in cand: {cpath}")
+                failed = True
+
+    # Compare files that exist on both sides.
+    for tic in all_tics:
+        for ext in ("ppm", "fnv"):
+            rpath = os.path.join(args.ref_dir, f"fb_{tic}.{ext}")
+            cpath = os.path.join(args.cand_dir, f"fb_{tic}.{ext}")
+            if not (os.path.isfile(rpath) and os.path.isfile(cpath)):
+                continue
+            with open(rpath, "rb") as rf, open(cpath, "rb") as cf:
+                rb = rf.read()
+                cb = cf.read()
+            if rb != cb:
+                print(f"MISMATCH: fb_{tic}.{ext}")
+                print(f"  ref:  {rpath} ({len(rb)} bytes)")
+                print(f"  cand: {cpath} ({len(cb)} bytes)")
+                if ext == "fnv":
+                    print(f"  ref content:  {rb!r}")
+                    print(f"  cand content: {cb!r}")
+                failed = True
+
+    if failed:
+        print("fbcheck: FAIL")
+        return EXIT_DIFF
+
+    n = len(all_tics)
+    print(
+        f"OK: {n} framebuffer tic(s), all .ppm byte-identical and .fnv content matched"
+    )
+    print(
+        "note: .fnv is FNV-1a64 over (64000 index bytes || 768 PLAYPAL); "
+        "cannot recompute from palette-mapped PPM alone — verified .fnv/.ppm pairs match"
+    )
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

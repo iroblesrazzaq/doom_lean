@@ -1,0 +1,8 @@
+# Build outputs
+oracle/build/
+lean/.lake/
+# Runtime state written by the oracle wrapper (config/save dirs)
+oracle/runtime/
+# Leftover temp dirs
+.agent_tmp_iwad/
+.DS_Store

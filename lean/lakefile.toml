@@ -1,0 +1,26 @@
+name = "doom"
+version = "0.1.0"
+defaultTargets = ["Doom"]
+
+[[lean_lib]]
+name = "Doom"
+
+[[lean_exe]]
+name = "stub-zero"
+root = "StubZero"
+
+[[lean_exe]]
+name = "stub-drift"
+root = "StubDrift"
+
+[[lean_exe]]
+name = "verify"
+root = "Verify"
+
+[[lean_exe]]
+name = "perf-encode"
+root = "PerfEncode"
+
+[[lean_exe]]
+name = "harness-test"
+root = "HarnessTest"

@@ -1,0 +1,10 @@
+# Static-analysis whitelist for tools/ci/gate_static.sh
+#
+# Format (one entry per line):
+#   <path>:<construct> # justification
+#
+# <path> is relative to the repository root (e.g. lean/Doom/Foo.lean).
+# <construct> is one of: sorry, panic!, unsafe, partial def, bang-accessor, bare-Int
+#
+# Lines starting with # and blank lines are ignored.
+# Unmatched findings fail the gate.

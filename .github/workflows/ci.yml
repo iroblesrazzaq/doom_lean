@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  playsim:
+    name: playsim
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-test tools
+        run: bash tools/tests/run_tests.sh
+      - name: Playsim gate
+        run: |
+          set -euo pipefail
+          REF_DIG="${REF_DIG:-fixtures/ref.dig}"
+          CAND_DIG="${CAND_DIG:-fixtures/cand.dig}"
+          if [[ ! -f "$REF_DIG" || ! -f "$CAND_DIG" ]]; then
+            echo "SKIP: playsim gate — digest artifacts not present yet (milestone 0)"
+            echo "looked for REF_DIG=$REF_DIG CAND_DIG=$CAND_DIG"
+            exit 0
+          fi
+          export REF_DIG CAND_DIG
+          if [[ -f "${REF_TRC:-fixtures/ref.trc}" && -f "${CAND_TRC:-fixtures/cand.trc}" ]]; then
+            export REF_TRC="${REF_TRC:-fixtures/ref.trc}"
+            export CAND_TRC="${CAND_TRC:-fixtures/cand.trc}"
+          fi
+          bash tools/ci/gate_playsim.sh
+
+  renderer:
+    name: renderer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Renderer gate
+        run: |
+          set -euo pipefail
+          REF_DIR="${REF_DIR:-fixtures/fb/ref}"
+          CAND_DIR="${CAND_DIR:-fixtures/fb/cand}"
+          if [[ ! -d "$REF_DIR" || ! -d "$CAND_DIR" ]]; then
+            echo "SKIP: renderer gate — framebuffer dirs not present yet (milestone 0)"
+            echo "looked for REF_DIR=$REF_DIR CAND_DIR=$CAND_DIR"
+            exit 0
+          fi
+          # Require at least one fb_*.ppm in ref to consider the gate runnable.
+          if ! ls "$REF_DIR"/fb_*.ppm >/dev/null 2>&1; then
+            echo "SKIP: renderer gate — no fb_*.ppm in $REF_DIR yet (milestone 0)"
+            exit 0
+          fi
+          bash tools/ci/gate_renderer.sh "$REF_DIR" "$CAND_DIR"
+
+  static:
+    name: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static gate
+        run: bash tools/ci/gate_static.sh
+
+  perf:
+    name: perf
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Perf gate
+        run: |
+          set -euo pipefail
+          BENCH="${PERF_BENCH:-lean/bench_playsim.sh}"
+          if [[ ! -e "$BENCH" ]]; then
+            echo "SKIP: perf gate — benchmark command not present yet (milestone 0)"
+            echo "looked for PERF_BENCH=$BENCH"
+            exit 0
+          fi
+          bash tools/ci/gate_perf.sh bash "$BENCH"
+
+  protected:
+    name: protected
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Protected-paths gate
+        run: |
+          set -euo pipefail
+          # On PRs, compare against the base branch; on push to default, the
+          # gate is informational about tools/fixtures drift vs origin/main.
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            git fetch origin "$GITHUB_BASE_REF" --depth=1
+            export BASE_REF="origin/$GITHUB_BASE_REF"
+          else
+            export BASE_REF="${BASE_REF:-origin/main}"
+            if git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+              :
+            elif git fetch origin main --depth=1; then
+              :
+            else
+              echo "SKIP: protected gate — cannot resolve BASE_REF=$BASE_REF yet (milestone 0)"
+              exit 0
+            fi
+          fi
+          if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+            echo "SKIP: protected gate — BASE_REF=$BASE_REF not available yet"
+            exit 0
+          fi
+          bash tools/ci/gate_protected.sh

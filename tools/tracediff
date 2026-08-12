@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+"""Exact tic-by-tic differ for Doom digest streams (and optional full traces).
+
+Usage:
+  tracediff REF.dig CAND.dig [--ref-trace REF.trc --cand-trace CAND.trc]
+
+Exit codes:
+  0  identical (same length, all digests equal)
+  1  divergence or length mismatch
+  2  usage or format error
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from typing import Any, List, Optional, Sequence, Tuple
+
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+
+from tracelib import (  # noqa: E402
+    FORMAT_VERSION,
+    MAGIC_DIG,
+    PlayerRecord,
+    SectorRecord,
+    ThinkerRecord,
+    TicRecord,
+    TraceFormatError,
+    fnv1a64,
+    parse_header,
+    read_digest_stream,
+    read_full_trace,
+)
+
+
+EXIT_OK = 0
+EXIT_DIFF = 1
+EXIT_ERROR = 2
+
+
+# ---------------------------------------------------------------------------
+# Field-level comparison
+# ---------------------------------------------------------------------------
+
+def _fmt_val(v: Any) -> str:
+    if isinstance(v, int):
+        if v < 0 or v > 0xFFFFFFFF:
+            return str(v)
+        # Prefer decimal; add hex for large unsigned-looking values.
+        if v >= 0x10000:
+            return f"{v} (0x{v:x})"
+        return str(v)
+    return str(v)
+
+
+def _delta(a: Any, b: Any) -> Optional[int]:
+    if isinstance(a, int) and isinstance(b, int):
+        return b - a
+    return None
+
+
+def _player_fields(p: PlayerRecord) -> List[Tuple[str, Any]]:
+    fields: List[Tuple[str, Any]] = [
+        ("player_index", p.player_index),
+        ("mo_trace_id", p.mo_trace_id),
+        ("x", p.x),
+        ("y", p.y),
+        ("z", p.z),
+        ("momx", p.momx),
+        ("momy", p.momy),
+        ("momz", p.momz),
+        ("angle", p.angle),
+        ("viewz", p.viewz),
+        ("health", p.health),
+        ("armorpoints", p.armorpoints),
+        ("readyweapon", p.readyweapon),
+        ("pendingweapon", p.pendingweapon),
+    ]
+    for i, a in enumerate(p.ammo):
+        fields.append((f"ammo[{i}]", a))
+    for i, w in enumerate(p.weaponowned):
+        fields.append((f"weaponowned[{i}]", w))
+    fields.extend(
+        [
+            ("cmd_forwardmove", p.cmd_forwardmove),
+            ("cmd_sidemove", p.cmd_sidemove),
+            ("cmd_angleturn", p.cmd_angleturn),
+            ("cmd_buttons", p.cmd_buttons),
+        ]
+    )
+    return fields
+
+
+def _mobj_fields(prefix: str, m) -> List[Tuple[str, Any]]:
+    return [
+        (f"{prefix}.x", m.x),
+        (f"{prefix}.y", m.y),
+        (f"{prefix}.z", m.z),
+        (f"{prefix}.momx", m.momx),
+        (f"{prefix}.momy", m.momy),
+        (f"{prefix}.momz", m.momz),
+        (f"{prefix}.angle", m.angle),
+        (f"{prefix}.state", m.state),
+        (f"{prefix}.tics", m.tics),
+        (f"{prefix}.health", m.health),
+        (f"{prefix}.flags", m.flags),
+        (f"{prefix}.type", m.type),
+    ]
+
+
+def _thinker_scalar_fields(t: ThinkerRecord) -> List[Tuple[str, Any]]:
+    prefix = f"thinker[trace_id={t.trace_id}]"
+    fields: List[Tuple[str, Any]] = [(f"{prefix}.func", t.func)]
+    if t.mobj is not None:
+        fields.extend(_mobj_fields(f"{prefix}.mobj", t.mobj))
+    return fields
+
+
+def _sector_fields(s: SectorRecord) -> List[Tuple[str, Any]]:
+    prefix = f"sector[{s.sector_index}]"
+    return [
+        (f"{prefix}.floorheight", s.floorheight),
+        (f"{prefix}.ceilingheight", s.ceilingheight),
+    ]
+
+
+# Sort priority: lower = more likely root cause.
+def _path_priority(path: str) -> Tuple[int, str]:
+    if path in ("rndindex", "prndindex"):
+        return (0, path)
+    if path in ("gametic", "in_level", "leveltime"):
+        return (1, path)
+    if path.startswith("player["):
+        return (2, path)
+    if path.startswith("thinker[") or path.startswith("thinkers"):
+        return (3, path)
+    if path.startswith("sector[") or path == "sectors_digest":
+        return (4, path)
+    return (5, path)
+
+
+DiffEntry = Tuple[str, Any, Any, Optional[Any]]  # path, expected, actual, prev_ref
+
+
+def collect_field_diffs(
+    ref: TicRecord,
+    cand: TicRecord,
+    prev_ref: Optional[TicRecord],
+) -> Tuple[List[DiffEntry], List[str]]:
+    """Return (sorted field diffs, extra narrative lines for thinker set/order)."""
+    diffs: List[DiffEntry] = []
+    notes: List[str] = []
+
+    def prev_val(path: str) -> Optional[Any]:
+        if prev_ref is None:
+            return None
+        # Re-walk prev_ref for the same path — simple lookup table.
+        lookup = _flat_fields(prev_ref)
+        return lookup.get(path)
+
+    for path, rv, cv in [
+        ("gametic", ref.gametic, cand.gametic),
+        ("in_level", ref.in_level, cand.in_level),
+        ("leveltime", ref.leveltime, cand.leveltime),
+        ("rndindex", ref.rndindex, cand.rndindex),
+        ("prndindex", ref.prndindex, cand.prndindex),
+        ("sectors_digest", ref.sectors_digest, cand.sectors_digest),
+    ]:
+        if rv != cv:
+            diffs.append((path, rv, cv, prev_val(path)))
+
+    # Players: match by player_index when possible, else by list position.
+    ref_by_idx = {p.player_index: p for p in ref.players}
+    cand_by_idx = {p.player_index: p for p in cand.players}
+    all_pidxs = sorted(set(ref_by_idx) | set(cand_by_idx))
+    for pidx in all_pidxs:
+        rp = ref_by_idx.get(pidx)
+        cp = cand_by_idx.get(pidx)
+        if rp is None:
+            diffs.append((f"player[{pidx}]", "<absent>", "<present>", None))
+            continue
+        if cp is None:
+            diffs.append((f"player[{pidx}]", "<present>", "<absent>", None))
+            continue
+        for fname, rv in _player_fields(rp):
+            path = f"player[{pidx}].{fname}"
+            cv = dict(_player_fields(cp))[fname]
+            if rv != cv:
+                diffs.append((path, rv, cv, prev_val(path)))
+
+    # Thinkers: set / ordering / content.
+    ref_ids = [t.trace_id for t in ref.thinkers]
+    cand_ids = [t.trace_id for t in cand.thinkers]
+    ref_set = set(ref_ids)
+    cand_set = set(cand_ids)
+
+    if ref_set != cand_set:
+        only_ref = sorted(ref_set - cand_set)
+        only_cand = sorted(cand_set - ref_set)
+        notes.append("THINKER SET MISMATCH:")
+        if only_ref:
+            notes.append(
+                f"  present only in ref:  {', '.join(str(i) for i in only_ref)}"
+            )
+        else:
+            notes.append("  present only in ref:  (none)")
+        if only_cand:
+            notes.append(
+                f"  present only in cand: {', '.join(str(i) for i in only_cand)}"
+            )
+        else:
+            notes.append("  present only in cand: (none)")
+        diffs.append(
+            (
+                "thinkers.set",
+                f"ids={ref_ids}",
+                f"ids={cand_ids}",
+                None,
+            )
+        )
+    elif ref_ids != cand_ids:
+        notes.append("THINKER ORDERING DIVERGENCE:")
+        notes.append(f"  ref order:  {ref_ids}")
+        notes.append(f"  cand order: {cand_ids}")
+        diffs.append(
+            (
+                "thinkers.order",
+                f"order={ref_ids}",
+                f"order={cand_ids}",
+                None,
+            )
+        )
+
+    # Content compare for shared trace_ids.
+    ref_by_tid = {t.trace_id: t for t in ref.thinkers}
+    cand_by_tid = {t.trace_id: t for t in cand.thinkers}
+    for tid in sorted(ref_set & cand_set):
+        rt = ref_by_tid[tid]
+        ct = cand_by_tid[tid]
+        rmap = dict(_thinker_scalar_fields(rt))
+        cmap = dict(_thinker_scalar_fields(ct))
+        # Also detect mobj presence mismatch.
+        if (rt.mobj is None) != (ct.mobj is None):
+            path = f"thinker[trace_id={tid}].mobj"
+            diffs.append(
+                (
+                    path,
+                    "<present>" if rt.mobj is not None else "<absent>",
+                    "<present>" if ct.mobj is not None else "<absent>",
+                    None,
+                )
+            )
+        for path in sorted(set(rmap) | set(cmap), key=_path_priority):
+            rv = rmap.get(path, "<absent>")
+            cv = cmap.get(path, "<absent>")
+            if rv != cv:
+                diffs.append((path, rv, cv, prev_val(path)))
+
+    # Sectors: match by sector_index.
+    ref_by_s = {s.sector_index: s for s in ref.sectors}
+    cand_by_s = {s.sector_index: s for s in cand.sectors}
+    for sidx in sorted(set(ref_by_s) | set(cand_by_s)):
+        rs = ref_by_s.get(sidx)
+        cs = cand_by_s.get(sidx)
+        if rs is None:
+            diffs.append((f"sector[{sidx}]", "<absent>", "<present>", None))
+            continue
+        if cs is None:
+            diffs.append((f"sector[{sidx}]", "<present>", "<absent>", None))
+            continue
+        cmap = dict(_sector_fields(cs))
+        for path, rv in _sector_fields(rs):
+            cv = cmap[path]
+            if rv != cv:
+                diffs.append((path, rv, cv, prev_val(path)))
+
+    diffs.sort(key=lambda d: _path_priority(d[0]))
+    return diffs, notes
+
+
+def _flat_fields(rec: TicRecord) -> dict:
+    out: dict = {
+        "gametic": rec.gametic,
+        "in_level": rec.in_level,
+        "leveltime": rec.leveltime,
+        "rndindex": rec.rndindex,
+        "prndindex": rec.prndindex,
+        "sectors_digest": rec.sectors_digest,
+    }
+    for p in rec.players:
+        for fname, v in _player_fields(p):
+            out[f"player[{p.player_index}].{fname}"] = v
+    for t in rec.thinkers:
+        for path, v in _thinker_scalar_fields(t):
+            out[path] = v
+    for s in rec.sectors:
+        for path, v in _sector_fields(s):
+            out[path] = v
+    return out
+
+
+def print_field_diff(
+    tic: int,
+    diffs: List[DiffEntry],
+    notes: List[str],
+) -> None:
+    print()
+    print("=" * 60)
+    print(f"  FIRST MISMATCH AT TIC {tic}")
+    print("=" * 60)
+    for line in notes:
+        print(line)
+    if not diffs and not notes:
+        print("(digests differ but no field-level differences found — unexpected)")
+        return
+    print()
+    print(f"{'FIELD':<42} {'EXPECTED (ref)':<22} {'ACTUAL (cand)':<22} {'DELTA':<12} {'TIC N-1 (ref)'}")
+    print("-" * 120)
+    for path, exp, act, prev in diffs:
+        d = _delta(exp, act)
+        dstr = str(d) if d is not None else ""
+        prev_str = _fmt_val(prev) if prev is not None else "-"
+        print(
+            f"{path:<42} {_fmt_val(exp):<22} {_fmt_val(act):<22} {dstr:<12} {prev_str}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def usage_error(msg: str) -> int:
+    print(f"error: {msg}", file=sys.stderr)
+    print(
+        "usage: tracediff REF.dig CAND.dig [--ref-trace REF.trc --cand-trace CAND.trc]",
+        file=sys.stderr,
+    )
+    return EXIT_ERROR
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="tracediff",
+        description="Exact tic-by-tic differ for Doom .dig streams (optional .trc detail).",
+    )
+    parser.add_argument("ref_dig", help="Reference digest stream (.dig)")
+    parser.add_argument("cand_dig", help="Candidate digest stream (.dig)")
+    parser.add_argument("--ref-trace", default=None, help="Reference full trace (.trc)")
+    parser.add_argument("--cand-trace", default=None, help="Candidate full trace (.trc)")
+    args = parser.parse_args(argv)
+
+    if (args.ref_trace is None) ^ (args.cand_trace is None):
+        return usage_error("provide both --ref-trace and --cand-trace, or neither")
+
+    for path in (args.ref_dig, args.cand_dig):
+        if not os.path.isfile(path):
+            return usage_error(f"file not found: {path}")
+    if args.ref_trace:
+        for path in (args.ref_trace, args.cand_trace):
+            if not os.path.isfile(path):
+                return usage_error(f"file not found: {path}")
+
+    # Validate digest headers (report version mismatch clearly).
+    try:
+        with open(args.ref_dig, "rb") as fp:
+            ref_raw_hdr = fp.read(16)
+        with open(args.cand_dig, "rb") as fp:
+            cand_raw_hdr = fp.read(16)
+    except OSError as e:
+        return usage_error(str(e))
+
+    try:
+        ref_hdr = parse_header(ref_raw_hdr, MAGIC_DIG)
+        cand_hdr = parse_header(cand_raw_hdr, MAGIC_DIG)
+    except TraceFormatError as e:
+        print(f"format error: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if ref_hdr.version != cand_hdr.version:
+        print(
+            f"format version mismatch: ref v{ref_hdr.version}, cand v{cand_hdr.version}"
+        )
+        return EXIT_ERROR
+    if ref_hdr.version != FORMAT_VERSION:
+        print(
+            f"format version mismatch: ref v{ref_hdr.version}, cand v{cand_hdr.version} "
+            f"(supported v{FORMAT_VERSION})"
+        )
+        return EXIT_ERROR
+    if ref_hdr.flags != 0 or cand_hdr.flags != 0:
+        print(
+            f"format error: nonzero flags (ref={ref_hdr.flags}, cand={cand_hdr.flags})",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    try:
+        _, ref_digests = read_digest_stream(args.ref_dig)
+        _, cand_digests = read_digest_stream(args.cand_dig)
+    except TraceFormatError as e:
+        print(f"format error: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    ref_records = None
+    cand_records = None
+    ref_raws = None
+    cand_raws = None
+    if args.ref_trace:
+        try:
+            _, ref_records, ref_raws = read_full_trace(args.ref_trace)
+            _, cand_records, cand_raws = read_full_trace(args.cand_trace)
+        except TraceFormatError as e:
+            print(f"format error reading full trace: {e}", file=sys.stderr)
+            return EXIT_ERROR
+
+        # Cross-check .trc/.dig consistency for each side.
+        for label, digests, raws, dig_path, trc_path in (
+            ("ref", ref_digests, ref_raws, args.ref_dig, args.ref_trace),
+            ("cand", cand_digests, cand_raws, args.cand_dig, args.cand_trace),
+        ):
+            n = min(len(digests), len(raws))
+            for i in range(n):
+                h = fnv1a64(raws[i])
+                if h != digests[i]:
+                    print(
+                        f"producer bug: {label} .trc/.dig inconsistent at tic {i}: "
+                        f"FNV of decoded record bytes is 0x{h:016x} but digest stream "
+                        f"has 0x{digests[i]:016x} ({trc_path} vs {dig_path})",
+                        file=sys.stderr,
+                    )
+                    return EXIT_ERROR
+            if len(digests) != len(raws):
+                print(
+                    f"producer bug: {label} .trc has {len(raws)} records but "
+                    f".dig has {len(digests)} digests ({trc_path} vs {dig_path})",
+                    file=sys.stderr,
+                )
+                return EXIT_ERROR
+
+    n_common = min(len(ref_digests), len(cand_digests))
+    mismatch_tic = None
+    for i in range(n_common):
+        if ref_digests[i] != cand_digests[i]:
+            mismatch_tic = i
+            break
+
+    if mismatch_tic is not None:
+        print(f"DIGEST MISMATCH AT TIC {mismatch_tic}")
+        print(
+            f"  ref:  0x{ref_digests[mismatch_tic]:016x}"
+        )
+        print(
+            f"  cand: 0x{cand_digests[mismatch_tic]:016x}"
+        )
+        if ref_records is not None and cand_records is not None:
+            if mismatch_tic >= len(ref_records) or mismatch_tic >= len(cand_records):
+                print(
+                    "full traces shorter than digest mismatch index; "
+                    "cannot emit field-level diff",
+                    file=sys.stderr,
+                )
+                return EXIT_DIFF
+            prev = (
+                ref_records[mismatch_tic - 1] if mismatch_tic > 0 else None
+            )
+            # Also decode N-1 from cand for completeness in context column (ref-sided).
+            diffs, notes = collect_field_diffs(
+                ref_records[mismatch_tic],
+                cand_records[mismatch_tic],
+                prev,
+            )
+            print_field_diff(mismatch_tic, diffs, notes)
+            if mismatch_tic > 0:
+                print()
+                print(
+                    f"(context: tic {mismatch_tic - 1} digests "
+                    f"ref=0x{ref_digests[mismatch_tic - 1]:016x} "
+                    f"cand=0x{cand_digests[mismatch_tic - 1]:016x})"
+                )
+        return EXIT_DIFF
+
+    if len(ref_digests) != len(cand_digests):
+        print(
+            f"trace length mismatch: ref {len(ref_digests)} tics, "
+            f"cand {len(cand_digests)} tics"
+        )
+        return EXIT_DIFF
+
+    print(f"OK: {len(ref_digests)} tics, all digests identical")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
