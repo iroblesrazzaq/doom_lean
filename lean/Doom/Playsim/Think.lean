@@ -30,8 +30,9 @@ private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
 private def setMo (gs : GameState) (i : Nat) (mo : Mobj) : GameState :=
   { gs with mobjs := setArr gs.mobjs i mo }
 
-/-- `P_LookForPlayers` — allaround = false path; draws no `P_Random`. -/
-def lookForPlayers (gs0 : GameState) (mobjIdx : Nat) (_allaround : Bool) :
+/-- `P_LookForPlayers` — `allaround = false` path for DEMO1 tic 0.
+Angle/MELEERANGE gate is incomplete: sight-true must loud-error until ported. -/
+def lookForPlayers (gs0 : GameState) (mobjIdx : Nat) (allaround : Bool) :
     Except String (GameState × Bool) := do
   match gs0.mobjs[mobjIdx]? with
   | none => throw "P_LookForPlayers: bad mobj"
@@ -69,16 +70,22 @@ def lookForPlayers (gs0 : GameState) (mobjIdx : Nat) (_allaround : Bool) :
               match gs.mobjs[player.mo.toNatClampNeg]? with
               | none => throw "P_LookForPlayers: player mo missing"
               | some pmo =>
-                let visible ← checkSightRejectOnly gs actor pmo
-                if !visible then
-                  actor := { actor with lastlook := (look + 1) &&& 3 }
-                  gs := setMo gs mobjIdx actor
-                else
-                  -- REJECT-only never returns true (BSP soft-split errors first).
-                  actor := { actor with target := player.mo }
-                  gs := setMo gs mobjIdx actor
-                  found := true
-                  done := true
+                let (gs1, visible) ← checkSight gs actor pmo
+                gs := gs1
+                match gs.mobjs[mobjIdx]? with
+                | none => throw "P_LookForPlayers: actor lost after sight"
+                | some a =>
+                  actor := a
+                  if !visible then
+                    actor := { actor with lastlook := (look + 1) &&& 3 }
+                    gs := setMo gs mobjIdx actor
+                  else if !allaround then
+                    throw "P_LookForPlayers: sight true — angle/MELEERANGE gate not implemented"
+                  else
+                    actor := { actor with target := player.mo }
+                    gs := setMo gs mobjIdx actor
+                    found := true
+                    done := true
     pure (gs, found)
 
 /-- `A_Look`. -/
@@ -108,7 +115,8 @@ def aLook (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
           gs := setMo gs mobjIdx { actor with target := soundtarget }
           let actor2 ← match gs.mobjs[mobjIdx]? with | some a => pure a | none => throw "A_Look"
           if (actor2.flags &&& MF_AMBUSH) != 0 then
-            let visible ← checkSightRejectOnly gs actor2 targ
+            let (gs1, visible) ← checkSight gs actor2 targ
+            gs := gs1
             if visible then seeyou := true
           else
             seeyou := true

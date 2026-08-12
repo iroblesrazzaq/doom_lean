@@ -99,6 +99,10 @@ structure GameState where
   totalkills : Int32
   totalitems : Int32
   totalsecret : Int32
+  /-- Global `validcount` (`r_state.h`); bumped by sight/path checks. -/
+  validcount : Int32
+  /-- Per-linedef `line_t::validcount` stamp. -/
+  lineValidcount : Array Int32
 
 def mkSectorRuntime (s : Sector) : SectorRuntime := {
   lightlevel := s.lightlevel
@@ -141,6 +145,8 @@ def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool
     totalkills := 0
     totalitems := 0
     totalsecret := 0
+    validcount := 0
+    lineValidcount := Array.replicate level.lines.size (0 : Int32)
   }
 
 /-- Proof-free array set. -/

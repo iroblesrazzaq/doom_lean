@@ -13,6 +13,7 @@ open Doom.Playsim.Fixed
 open Doom.Playsim.Angle
 open Doom.Playsim.Tables
 open Doom.Playsim.Random
+open Doom.Playsim.Sight
 open Doom.Harness.Fnv
 
 def assert (name : String) (cond : Bool) : IO Bool := do
@@ -145,6 +146,33 @@ def main (_args : List String) : IO UInt32 := do
   ok := (← assert "mRandom/pRandom independent"
     (m1 == 8 && p1 == 8 && m2 == 109
       && sm3.rndindex == 2 && sm3.prndindex == 1)) && ok
+
+  -- P_DivlineSide / P_InterceptVector2 (hand-computed vs C) --------------
+  let nVert : Divline := { x := 100 * 65536, y := 200 * 65536, dx := 0, dy := 50 * 65536 }
+  ok := (← assert "divlineSide vert on"
+    (divlineSide (100 * 65536) 0 nVert == 2)) && ok
+  ok := (← assert "divlineSide vert front"
+    (divlineSide (90 * 65536) 0 nVert == 1)) && ok
+  ok := (← assert "divlineSide vert back"
+    (divlineSide (110 * 65536) 0 nVert == 0)) && ok
+  let nHoriz : Divline := { x := 0, y := 50 * 65536, dx := 10 * 65536, dy := 0 }
+  ok := (← assert "divlineSide horiz vanilla-on-bug"
+    (divlineSide (50 * 65536) 999 nHoriz == 2)) && ok
+  ok := (← assert "divlineSide horiz normal"
+    (divlineSide 0 (40 * 65536) nHoriz == 0)) && ok
+  let nDiag : Divline := { x := 0, y := 0, dx := 65536, dy := 65536 }
+  ok := (← assert "divlineSide diag front"
+    (divlineSide 65536 0 nDiag == 0)) && ok
+  ok := (← assert "divlineSide diag back"
+    (divlineSide 0 65536 nDiag == 1)) && ok
+  ok := (← assert "divlineSide diag on"
+    (divlineSide 32768 32768 nDiag == 2)) && ok
+  let v2 : Divline := { x := 0, y := 0, dx := 100 * 65536, dy := 0 }
+  let v1 : Divline := { x := 50 * 65536, y := -10 * 65536, dx := 0, dy := 20 * 65536 }
+  ok := (← assert "interceptVector2 crossing"
+    (interceptVector2 v2 v1 == 32768)) && ok
+  ok := (← assert "interceptVector2 parallel den0"
+    (interceptVector2 v2 { x := 0, y := 0, dx := 50 * 65536, dy := 0 } == 0)) && ok
 
   if ok then
     IO.println "playsim-test: all passed"
