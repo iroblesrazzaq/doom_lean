@@ -1,3 +1,4 @@
+import Doom.Playsim.Fixed
 import Doom.Playsim.Random
 
 /-!
@@ -10,9 +11,11 @@ Audio output itself is not simulated — only the pitch-variation RNG from
 
 namespace Doom.Playsim.Sound
 
+open Doom.Playsim.Fixed
 open Doom.Playsim.Random
 
 /-- `sfxenum_t` values needed for pitch-branch rules (`sounds.h`, `sfx_None = 0`). -/
+def sfx_pistol : Nat := 1
 def sfx_sawup : Nat := 10
 def sfx_sawhit : Nat := 13
 def sfx_itemup : Nat := 32
@@ -42,5 +45,37 @@ def startSoundPitchRng (rng : RandomState) (sfxId : Nat) : RandomState :=
     (mRandom rng).2
   else
     rng
+
+/-- `s_sound.c` `S_CLIPPING_DIST` / `S_CLOSE_DIST` / `S_ATTENUATOR`. -/
+def S_CLIPPING_DIST : Int32 := 1200 * FRACUNIT
+def S_CLOSE_DIST : Int32 := 200 * FRACUNIT
+def S_ATTENUATOR : Int32 := 1000
+/-- Vanilla `S_Init(sfxVolume * 8)` with default `sfxVolume = 8`. -/
+def snd_SfxVolume : Int32 := 64
+
+/-- Approx Euclidean distance used by `S_AdjustSoundParams`. -/
+def approxSoundDist (lx ly sx sy : Int32) : Int32 :=
+  let adx := wabs (lx - sx)
+  let ady := wabs (ly - sy)
+  adx + ady - ((if adx < ady then adx else ady) >>> 1)
+
+/--
+`S_AdjustSoundParams` audibility for `gamemap != 8` (E1M1). Inaudible
+origins return before the pitch `M_Random` in `S_StartSound`.
+-/
+def soundAudible (lx ly sx sy : Int32) : Bool :=
+  let dist := approxSoundDist lx ly sx sy
+  if dist > S_CLIPPING_DIST then
+    false
+  else if dist < S_CLOSE_DIST then
+    snd_SfxVolume > 0
+  else
+    let vol := (snd_SfxVolume * ((S_CLIPPING_DIST - dist) >>> 16)) / S_ATTENUATOR
+    vol > 0
+
+/-- Pitch RNG only when `S_StartSound` would not early-out as inaudible. -/
+def startSoundPitchRngMaybe (rng : RandomState) (sfxId : Nat) (audible : Bool) :
+    RandomState :=
+  if audible then startSoundPitchRng rng sfxId else rng
 
 end Doom.Playsim.Sound

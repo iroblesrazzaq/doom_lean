@@ -17,6 +17,7 @@ import Doom.Playsim.Inter
 import Doom.Playsim.Spawn
 import Doom.Playsim.Weapons
 import Doom.Playsim.Psprite
+import Doom.Playsim.Combat
 import Doom.Playsim.Sight
 import Doom.Playsim.Sound
 import Doom.Playsim.Enemy

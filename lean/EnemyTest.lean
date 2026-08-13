@@ -1,20 +1,29 @@
 import Doom.Playsim.Angle
+import Doom.Playsim.Combat
 import Doom.Playsim.Demo
 import Doom.Playsim.Enemy
 import Doom.Playsim.Fixed
+import Doom.Playsim.Flags
+import Doom.Playsim.GameState
+import Doom.Playsim.Level
+import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sound
 import Doom.Playsim.Tables
 
 /-!
-P2c-iii implementation tests: R_PointToAngle2 quadrants, P_AproxDistance,
-seesound remap draw counts, P_NewChaseDir hand-set scenario helpers.
+P2c-v implementation tests: A_FaceTarget, P_DamageMobj pain path, plus
+retained P2c-iii helpers.
 -/
 
 open Doom.Playsim.Angle
+open Doom.Playsim.Combat
 open Doom.Playsim.Demo
 open Doom.Playsim.Enemy
 open Doom.Playsim.Fixed
+open Doom.Playsim.Flags
+open Doom.Playsim.GameState
+open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sound
 open Doom.Playsim.Tables
@@ -69,6 +78,17 @@ def main (_args : List String) : IO UInt32 := do
   -- pitch RNG one M_Random for remapped seesound
   let rngP := startSoundPitchRng clearRandom sfx_posit1
   ok := (← assert "seesound pitch draws M_Random" (rngP.rndindex == 1)) && ok
+  ok := (← assert "inaudible skips pitch RNG"
+    ((startSoundPitchRngMaybe clearRandom sfx_posit1 false).rndindex == 0)) && ok
+  ok := (← assert "near origin audible"
+    (soundAudible 0 0 FRACUNIT 0)) && ok
+  ok := (← assert "beyond clip inaudible"
+    (!soundAudible 0 0 (1201 * FRACUNIT) 0)) && ok
+  -- Volume gate: (64 * remaining_mapunits) / 1000; remaining 16 → 1, 15 → 0.
+  ok := (← assert "volume-zero band inaudible"
+    (!soundAudible 0 0 (1185 * FRACUNIT) 0)) && ok
+  ok := (← assert "volume-positive just closer"
+    (soundAudible 0 0 (1184 * FRACUNIT) 0)) && ok
 
   -- demo angleturn sign-extend (TRACE.md signed short) --------------------
   -- 0xFE as signed char << 8 → -512 (not unsigned 65024)
@@ -95,9 +115,83 @@ def main (_args : List String) : IO UInt32 := do
   ok := (← assert "ANG90/ANG270 gate constants"
     (ANG90 == 0x40000000 && ANG270 == 0xc0000000)) && ok
 
+  -- A_FaceTarget (no MF_SHADOW) ---------------------------------------------
+  let emptyLevel : Doom.Playsim.Level.LevelData := {
+    vertexes := #[]
+    sectors := #[]
+    sides := #[]
+    lines := #[]
+    segs := #[]
+    subsectors := #[]
+    nodes := #[]
+    things := #[]
+    blockmap := { originX := 0, originY := 0, width := 0, height := 0, lump := #[] }
+    reject := ByteArray.empty
+  }
+  let gsF0 := Doom.Playsim.GameState.initFromLevel emptyLevel 2 #[true, false, false, false] 0
+  let actor := {
+    Doom.Playsim.Mobj.empty with
+    x := 0, y := 0, angle := 0, flags := MF_AMBUSH ||| MF_SHOOTABLE
+    target := 1
+  }
+  let targ := {
+    Doom.Playsim.Mobj.empty with
+    x := FRACUNIT, y := 0, flags := MF_SHOOTABLE
+  }
+  let gsF := { gsF0 with mobjs := #[actor, targ] }
+  match aFaceTarget gsF 0 with
+  | Except.error e =>
+    ok := (← assert s!"A_FaceTarget east ({e})" false) && ok
+  | Except.ok gsF1 =>
+    match gsF1.mobjs[0]? with
+    | none => ok := (← assert "A_FaceTarget actor present" false) && ok
+    | some mo =>
+      ok := (← assert "A_FaceTarget east angle 0" (mo.angle == 0)) && ok
+      ok := (← assert "A_FaceTarget cleared MF_AMBUSH"
+        ((mo.flags &&& MF_AMBUSH) == 0)) && ok
+      ok := (← assert "A_FaceTarget no shadow RNG"
+        (gsF1.rng.prndindex == 0)) && ok
+
+  -- P_DamageMobj enemy pain path --------------------------------------------
+  let victim := {
+    Doom.Playsim.Mobj.empty with
+    typeId := 2, x := 10 * FRACUNIT, y := 0, z := 0
+    health := 30, flags := MF_SOLID ||| MF_SHOOTABLE ||| MF_COUNTKILL
+    height := 56 * FRACUNIT, radius := 20 * FRACUNIT
+    state := 209, tics := 3
+  }
+  let inflictor := {
+    Doom.Playsim.Mobj.empty with
+    x := 0, y := 0, player := 0, typeId := 0, flags := MF_SHOOTABLE
+  }
+  let pl := {
+    Doom.Playsim.Player.empty with
+    mo := 0, readyweapon := wp_pistol, playerstate := PST_LIVE, health := 100
+    pendingweapon := wp_nochange
+  }
+  let gsD0 := {
+    gsF0 with
+    mobjs := #[inflictor, victim]
+    players := arrSet gsF0.players 0 pl
+  }
+  match damageMobj gsD0 1 (some 0) (some 0) 5 with
+  | Except.error e =>
+    ok := (← assert s!"P_DamageMobj pain ({e})" false) && ok
+  | Except.ok gsD1 =>
+    match gsD1.mobjs[1]? with
+    | none => ok := (← assert "damage victim present" false) && ok
+    | some v =>
+      ok := (← assert "damage health 30-5=25" (v.health == 25)) && ok
+      ok := (← assert "damage MF_JUSTHIT" ((v.flags &&& MF_JUSTHIT) != 0)) && ok
+      ok := (← assert "damage painstate 220" (v.state == 220)) && ok
+      ok := (← assert "damage reactiontime 0" (v.reactiontime == 0)) && ok
+      ok := (← assert "damage BASETHRESHOLD" (v.threshold == BASETHRESHOLD)) && ok
+      ok := (← assert "damage retarget inflictor" (v.target == 0)) && ok
+      ok := (← assert "damage pain drew P_Random" (gsD1.rng.prndindex == 1)) && ok
+
   if ok then
-    IO.println "ALL P2c-iii ENEMY UNIT CHECKS PASSED"
+    IO.println "ALL P2c-v ENEMY UNIT CHECKS PASSED"
     pure 0
   else
-    IO.eprintln "SOME P2c-iii ENEMY UNIT CHECKS FAILED"
+    IO.eprintln "SOME P2c-v ENEMY UNIT CHECKS FAILED"
     pure 1

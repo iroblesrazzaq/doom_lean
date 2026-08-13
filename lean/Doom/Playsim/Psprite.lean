@@ -20,15 +20,15 @@ def WEAPONBOTTOM : Int32 := 128 * FRACUNIT
 def WEAPONTOP : Int32 := 32 * FRACUNIT
 def RAISESPEED : Int32 := 6 * FRACUNIT
 
-private def setPsp (ps : Array Psprite) (pos : Nat) (v : Psprite) : Array Psprite :=
+def setPsp (ps : Array Psprite) (pos : Nat) (v : Psprite) : Array Psprite :=
   if h : pos < ps.size then ps.set pos v else ps
 
-private def getPsp (ps : Array Psprite) (pos : Nat) : Psprite :=
+def getPsp (ps : Array Psprite) (pos : Nat) : Psprite :=
   match ps[pos]? with
   | some p => p
   | none => Psprite.inactive
 
-private def weaponAt (w : Int32) : Except String WeaponInfo :=
+def weaponAt (w : Int32) : Except String WeaponInfo :=
   match weaponinfo[w.toNatClampNeg]? with
   | some info => pure info
   | none => throw s!"weaponinfo: bad weapon {w}"
@@ -106,25 +106,5 @@ def setupPsprites (p0 : Player) : Except String Player := do
     i := i + 1
   p := { p with pendingweapon := p.readyweapon }
   bringUpWeapon p
-
-/-- `P_MovePsprites`. -/
-def movePsprites (p0 : Player) : Except String Player := do
-  let mut p := p0
-  let mut i : Nat := 0
-  while i < NUMPSPRITES do
-    let psp := getPsp p.psprites i
-    if psp.state != 0 then
-      if psp.tics != -1 then
-        let tics := psp.tics - 1
-        p := { p with psprites := setPsp p.psprites i { psp with tics } }
-        if tics == 0 then
-          match states[psp.state.toNat]? with
-          | none => throw "P_MovePsprites: bad state"
-          | some st =>
-            p ← setPsprite p i st.nextstate
-    i := i + 1
-  let w := getPsp p.psprites ps_weapon
-  let f := getPsp p.psprites ps_flash
-  pure { p with psprites := setPsp p.psprites ps_flash { f with sx := w.sx, sy := w.sy } }
 
 end Doom.Playsim.Psprite

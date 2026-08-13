@@ -16,7 +16,17 @@ def NUMPOWERS : Nat := 6
 /-- `weapontype_t`: `wp_fist`..`wp_supershotgun`, then `NUMWEAPONS`, then `wp_nochange`. -/
 def wp_fist : Int32 := 0
 def wp_pistol : Int32 := 1
+def wp_shotgun : Int32 := 2
+def wp_chaingun : Int32 := 3
+def wp_missile : Int32 := 4
+def wp_plasma : Int32 := 5
+def wp_bfg : Int32 := 6
+def wp_chainsaw : Int32 := 7
+def wp_supershotgun : Int32 := 8
 def wp_nochange : Int32 := 10
+
+/-- `d_event.h` `BT_ATTACK`. -/
+def BT_ATTACK : UInt32 := 1
 
 def PST_LIVE : Int32 := 0
 def PST_DEAD : Int32 := 1
@@ -87,6 +97,8 @@ structure Player where
   usedown : Bool
   attackdown : Bool
   cheats : Int32
+  /-- `player_t.extralight` (untraced; `A_Light1` writes it). -/
+  extralight : Int32
   deriving Repr
 
 def defaultMaxAmmo : Array Int32 := #[200, 50, 300, 50]
@@ -119,6 +131,7 @@ def empty : Player := {
   usedown := false
   attackdown := false
   cheats := 0
+  extralight := 0
 }
 
 private def arrSet (arr : Array Int32) (i : Nat) (v : Int32) : Array Int32 :=

@@ -396,6 +396,42 @@ def main (_args : List String) : IO UInt32 := do
           ok := (← assert "HitSlideLine diag |mom| not grown"
             (after <= before + 1)) && ok
 
+  -- PIT_AddThingIntercepts: horizontal trace through a thing at origin ------
+  let thing : Doom.Playsim.Mobj.Mobj := {
+    Doom.Playsim.Mobj.empty with
+    x := 0, y := 0, radius := FRACUNIT
+  }
+  let pts0 : PathTraverseState := {
+    trace := { x := (-2 : Int32) * FRACUNIT, y := 0, dx := 4 * FRACUNIT, dy := 0 }
+    earlyout := false
+    intercepts := #[]
+  }
+  match pitAddThingIntercepts pts0 3 thing with
+  | Except.error e =>
+    ok := (← assert s!"PIT_AddThingIntercepts ({e})" false) && ok
+  | Except.ok (pts, cont) =>
+    ok := (← assert "PIT_AddThingIntercepts continues" cont) && ok
+    ok := (← assert "PIT_AddThingIntercepts one entry" (pts.intercepts.size == 1)) && ok
+    match pts.intercepts[0]? with
+    | none => ok := (← assert "PIT_AddThingIntercepts intercept" false) && ok
+    | some inn =>
+      ok := (← assert "PIT_AddThingIntercepts !isaline" (!inn.isaline)) && ok
+      ok := (← assert "PIT_AddThingIntercepts thingIdx" (inn.thingIdx == 3)) && ok
+      ok := (← assert "PIT_AddThingIntercepts frac in range"
+        (inn.frac >= 0 && inn.frac <= FRACUNIT)) && ok
+  -- parallel miss: thing entirely on one side of the trace
+  let ptsMiss : PathTraverseState := {
+    trace := { x := 0, y := 10 * FRACUNIT, dx := FRACUNIT, dy := 0 }
+    earlyout := false
+    intercepts := #[]
+  }
+  match pitAddThingIntercepts ptsMiss 0 thing with
+  | Except.error e =>
+    ok := (← assert s!"PIT_AddThingIntercepts miss ({e})" false) && ok
+  | Except.ok (pts, cont) =>
+    ok := (← assert "PIT_AddThingIntercepts miss continues" cont) && ok
+    ok := (← assert "PIT_AddThingIntercepts miss empty" (pts.intercepts.size == 0)) && ok
+
   if ok then
     IO.println "movement-test: all passed"
     pure 0

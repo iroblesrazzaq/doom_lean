@@ -17,6 +17,8 @@ def NF_SUBSECTOR : UInt32 := 0x8000
 
 /-- `doomdata.h` `ML_TWOSIDED`. -/
 def ML_TWOSIDED : Int32 := 4
+/-- `doomdata.h` `ML_SOUNDBLOCK`. -/
+def ML_SOUNDBLOCK : Int32 := 64
 
 /-- `m_bbox.h` box indices. -/
 def BOXTOP : Nat := 0

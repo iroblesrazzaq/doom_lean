@@ -3,6 +3,7 @@ import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
 import Doom.Playsim.Info
+import Doom.Playsim.Level
 import Doom.Playsim.Map
 import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
@@ -27,6 +28,7 @@ open Doom.Playsim.Fixed
 open Doom.Playsim.Flags
 open Doom.Playsim.GameState
 open Doom.Playsim.Info
+open Doom.Playsim.Level
 open Doom.Playsim.Map
 open Doom.Playsim.MapUtil
 open Doom.Playsim.Mobj
@@ -371,6 +373,108 @@ def lookForPlayers (gs0 : GameState) (mobjIdx : Nat) (allaround : Bool) :
                       done := true
     pure (gs, found)
 
+/-- `A_FaceTarget`. `MF_SHADOW` jitter is implemented but unused on DEMO1. -/
+def aFaceTarget (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_FaceTarget: bad mobj"
+  | some actor =>
+    if actor.target < 0 then
+      return gs0
+    match gs0.mobjs[actor.target.toNatClampNeg]? with
+    | none => throw "A_FaceTarget: bad target"
+    | some targ =>
+      let mo0 := { actor with flags := actor.flags &&& (~~~MF_AMBUSH) }
+      let ang := pointToAngle2 mo0.x mo0.y targ.x targ.y
+      let mut gs := setMo gs0 mobjIdx { mo0 with angle := ang }
+      if (targ.flags &&& MF_SHADOW) != 0 then
+        let (d, rng) := pSubRandom gs.rng
+        match gs.mobjs[mobjIdx]? with
+        | none => throw "A_FaceTarget: lost on shadow"
+        | some mo =>
+          pure { setMo gs mobjIdx { mo with angle := mo.angle + (d.toUInt32 <<< 21) } with rng }
+      else
+        pure gs
+
+/--
+`S_StartSound` origin vs consoleplayer: player/null origins skip
+`S_AdjustSoundParams`; distant origins may return before pitch `M_Random`.
+-/
+def originAudible (gs : GameState) (originIdx : Nat) : Bool :=
+  match gs.players[gs.consoleplayer]? with
+  | none => true
+  | some pl =>
+    if pl.mo == originIdx.toInt32 then
+      true
+    else
+      match gs.mobjs[pl.mo.toNatClampNeg]?, gs.mobjs[originIdx]? with
+      | some listener, some origin =>
+        soundAudible listener.x listener.y origin.x origin.y
+      | _, _ => true
+
+/-- `A_Pain`. -/
+def aPain (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_Pain: bad mobj"
+  | some actor =>
+    let info ← infoOf actor
+    if info.painsound != 0 then
+      let rng := startSoundPitchRngMaybe gs0.rng info.painsound.toNatClampNeg
+        (originAudible gs0 mobjIdx)
+      pure { gs0 with rng }
+    else
+      pure gs0
+
+/-- `P_RecursiveSound` — fuel-bounded DFS matching C call order. -/
+def recursiveSoundFuel (gs0 : GameState) (secIdx : Nat) (soundblocks : Int32)
+    (targetIdx : Int32) (fuel : Nat) : Except String GameState :=
+  match fuel with
+  | 0 => throw "P_RecursiveSound: fuel exhausted"
+  | fuel' + 1 => do
+    match gs0.sectors[secIdx]? with
+    | none => throw "P_RecursiveSound: bad sector"
+    | some sec0 =>
+      if sec0.validcount == gs0.validcount && sec0.soundtraversed <= soundblocks + 1 then
+        return gs0
+      let sec := {
+        sec0 with
+        validcount := gs0.validcount
+        soundtraversed := soundblocks + 1
+        soundtarget := targetIdx
+      }
+      let mut gs := { gs0 with sectors := setArr gs0.sectors secIdx sec }
+      let mut i : Nat := 0
+      while i < sec.lines.size do
+        match sec.lines[i]? with
+        | none => throw "P_RecursiveSound: bad line idx"
+        | some li =>
+          match gs.level.lines[li.toNat]? with
+          | none => throw "P_RecursiveSound: bad linedef"
+          | some ld =>
+            if (ld.flags &&& ML_TWOSIDED) != 0 then
+              let op ← lineOpening gs ld
+              if op.openrange > 0 then
+                let other : Int32 :=
+                  if ld.frontsector == secIdx.toInt32 then ld.backsector else ld.frontsector
+                if other >= 0 then
+                  if (ld.flags &&& ML_SOUNDBLOCK) != 0 then
+                    if soundblocks == 0 then
+                      gs ← recursiveSoundFuel gs other.toNatClampNeg 1 targetIdx fuel'
+                  else
+                    gs ← recursiveSoundFuel gs other.toNatClampNeg soundblocks targetIdx fuel'
+        i := i + 1
+      pure gs
+
+/-- `P_NoiseAlert`. -/
+def noiseAlert (gs0 : GameState) (targetIdx emitterIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[emitterIdx]? with
+  | none => throw "P_NoiseAlert: bad emitter"
+  | some em =>
+    match gs0.level.subsectors[em.subsector.toNat]? with
+    | none => throw "P_NoiseAlert: bad subsector"
+    | some ss =>
+      let gs := { gs0 with validcount := gs0.validcount + 1 }
+      recursiveSoundFuel gs ss.sector.toNat 0 targetIdx.toInt32 1000000
+
 -- Fuel-bounded set-state / action / look / chase cycle (no partial).
 mutual
 def setMobjStateFuel (gs0 : GameState) (mobjIdx : Nat) (state0 : UInt32) (fuel : Nat) :
@@ -414,6 +518,10 @@ def runMobjActionFuel (gs0 : GameState) (mobjIdx : Nat) (action : ActionId) (fue
       aLookFuel gs0 mobjIdx fuel'
     else if action == action_A_Chase then
       aChaseFuel gs0 mobjIdx fuel'
+    else if action == action_A_FaceTarget then
+      aFaceTarget gs0 mobjIdx
+    else if action == action_A_Pain then
+      aPain gs0 mobjIdx
     else
       throw s!"P_MobjThinker/SetMobjState: unimplemented action {action}"
 
@@ -479,7 +587,12 @@ def aLookFuel (gs0 : GameState) (mobjIdx : Nat) (fuel : Nat) : Except String Gam
             else
               (seesound, gs.rng)
           gs := { gs with rng }
-          gs := { gs with rng := startSoundPitchRng gs.rng sound.toNatClampNeg }
+          let fullVol := actorS.typeId == MT_SPIDER || actorS.typeId == MT_CYBORG
+          gs := {
+            gs with
+            rng := startSoundPitchRngMaybe gs.rng sound.toNatClampNeg
+              (fullVol || originAudible gs mobjIdx)
+          }
         let (gs2, _) ← setMobjStateFuel gs mobjIdx info.seestate fuel'
         pure gs2
 
@@ -556,7 +669,15 @@ def aChaseFuel (gs0 : GameState) (mobjIdx : Nat) (fuel : Nat) : Except String Ga
           let (gs1, canFire) ← checkMissileRange gs mobjIdx
           gs := gs1
           if canFire then
-            throw "A_Chase: missilestate not implemented"
+            match gs.mobjs[mobjIdx]? with
+            | none => throw "A_Chase: lost before missilestate"
+            | some a =>
+              let info ← infoOf a
+              let (gs2, _) ← setMobjStateFuel gs mobjIdx info.missilestate fuel'
+              match gs2.mobjs[mobjIdx]? with
+              | none => throw "A_Chase: lost after missilestate"
+              | some a2 =>
+                return setMo gs2 mobjIdx { a2 with flags := a2.flags ||| MF_JUSTATTACKED }
       match gs.mobjs[mobjIdx]? with
       | none => throw "A_Chase: lost before move"
       | some a => actor := a
@@ -580,7 +701,8 @@ def aChaseFuel (gs0 : GameState) (mobjIdx : Nat) (fuel : Nat) : Except String Ga
           if r < 3 then
             gs2 := {
               gs2 with
-              rng := startSoundPitchRng gs2.rng info.activesound.toNatClampNeg
+              rng := startSoundPitchRngMaybe gs2.rng info.activesound.toNatClampNeg
+                (originAudible gs2 mobjIdx)
             }
           pure gs2
         else

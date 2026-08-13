@@ -24,7 +24,15 @@ def S_PISTOL : UInt32 := 10
 def S_PISTOLDOWN : UInt32 := 11
 def S_PISTOLUP : UInt32 := 12
 def S_PISTOL1 : UInt32 := 13
+def S_PISTOL2 : UInt32 := 14
 def S_PISTOLFLASH : UInt32 := 17
+def S_PLAY_ATK1 : UInt32 := 154
+def S_PLAY_ATK2 : UInt32 := 155
+def S_BLOOD1 : UInt32 := 90
+def S_BLOOD2 : UInt32 := 91
+def S_BLOOD3 : UInt32 := 92
+/-- `mobjtype_t` `MT_BLOOD`. -/
+def MT_BLOOD : Int32 := 38
 def S_SGUN : UInt32 := 18
 def S_SGUNDOWN : UInt32 := 19
 def S_SGUNUP : UInt32 := 20

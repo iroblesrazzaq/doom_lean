@@ -1,9 +1,9 @@
 import Doom.Playsim.Angle
+import Doom.Playsim.Combat
 import Doom.Playsim.Fixed
 import Doom.Playsim.GameState
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
-import Doom.Playsim.Psprite
 import Doom.Playsim.Tables
 import Doom.Playsim.Think
 
@@ -16,11 +16,11 @@ import Doom.Playsim.Think
 namespace Doom.Playsim.PlayerThink
 
 open Doom.Playsim.Angle
+open Doom.Playsim.Combat
 open Doom.Playsim.Fixed
 open Doom.Playsim.GameState
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
-open Doom.Playsim.Psprite
 open Doom.Playsim.Tables
 open Doom.Playsim.Think
 
@@ -202,10 +202,7 @@ def playerThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState :=
             throw "P_PlayerThink: pendingweapon != wp_nochange unexpected"
           if (cmd.buttons &&& 2) != 0 then  -- BT_USE
             throw "P_PlayerThink: use not implemented"
-          gs ←
-            match movePsprites player with
-            | Except.error e => throw e
-            | Except.ok p2 => pure { gs with players := setArr gs.players playerIdx p2 }
+          gs ← Combat.movePsprites gs playerIdx
           pure gs
 
 end Doom.Playsim.PlayerThink

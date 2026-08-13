@@ -10,7 +10,7 @@ import Doom.Playsim.Mobj
 
 `p_maputl.c` open subset: point/box line side, line opening, thing position
 link/unlink (sector + blockmap), blockmap iterators, and `P_PathTraverse`
-(intercepts / `PT_ADDLINES` only — `PT_ADDTHINGS` loud-errors).
+(`PT_ADDLINES` / `PT_ADDTHINGS`).
 -/
 
 namespace Doom.Playsim.MapUtil
@@ -300,12 +300,14 @@ structure Divline where
   dx : Int32
   dy : Int32
 
-/-- One intercept entry (`intercept_t`); things unused in this open subset. -/
+/-- One intercept entry (`intercept_t`). -/
 structure Intercept where
   frac : Int32
   isaline : Bool
   /-- Linedef index when `isaline`. -/
   lineIdx : Nat
+  /-- Mobj index when `PT_ADDTHINGS` and `!isaline`. -/
+  thingIdx : Nat
 
 /-- Path-traverse scratch (C globals `trace` / `earlyout` / `intercepts`). -/
 structure PathTraverseState where
@@ -383,9 +385,37 @@ def pitAddLineIntercepts (gs : GameState) (pts0 : PathTraverseState) (lineIdx : 
       throw "PIT_AddLineIntercepts: intercepts overrun"
     let pts := {
       pts0 with
-      intercepts := pts0.intercepts.push { frac, isaline := true, lineIdx }
+      intercepts := pts0.intercepts.push { frac, isaline := true, lineIdx, thingIdx := 0 }
     }
     pure (pts, true)
+
+/-- `PIT_AddThingIntercepts`. Returns `false` to early-out (never in vanilla). -/
+def pitAddThingIntercepts (pts0 : PathTraverseState) (thingIdx : Nat) (thing : Mobj) :
+    Except String (PathTraverseState × Bool) := do
+  let trace := pts0.trace
+  let tracepositive := (trace.dx ^^^ trace.dy) > 0
+  let (x1, y1, x2, y2) :=
+    if tracepositive then
+      (thing.x - thing.radius, thing.y + thing.radius,
+       thing.x + thing.radius, thing.y - thing.radius)
+    else
+      (thing.x - thing.radius, thing.y - thing.radius,
+       thing.x + thing.radius, thing.y + thing.radius)
+  let s1 := pointOnDivlineSide x1 y1 trace
+  let s2 := pointOnDivlineSide x2 y2 trace
+  if s1 == s2 then
+    return (pts0, true)
+  let dl : Divline := { x := x1, y := y1, dx := x2 - x1, dy := y2 - y1 }
+  let frac := interceptVector trace dl
+  if frac < 0 then
+    return (pts0, true)
+  if pts0.intercepts.size >= MAXINTERCEPTS then
+    throw "PIT_AddThingIntercepts: intercepts overrun"
+  let pts := {
+    pts0 with
+    intercepts := pts0.intercepts.push { frac, isaline := false, lineIdx := 0, thingIdx }
+  }
+  pure (pts, true)
 
 /--
 `P_TraverseIntercepts` — sort by ascending `frac`, call `trav` until false or
@@ -431,15 +461,12 @@ def traverseIntercepts {σ : Type} (gs0 : GameState) (pts0 : PathTraverseState) 
   pure (gs, pts, st, true)
 
 /--
-`P_PathTraverse` — blockmap DDA + line intercepts. `PT_ADDTHINGS` is a
-loud-error (unused by `P_SlideMove`).
+`P_PathTraverse` — blockmap DDA + line/thing intercepts.
 -/
 def pathTraverse {σ : Type} (gs0 : GameState) (st0 : σ)
     (x1_0 y1_0 x2 y2 : Int32) (flags : Nat)
     (trav : GameState → σ → Intercept → Except String (GameState × σ × Bool)) :
     Except String (GameState × σ × Bool) := do
-  if (flags &&& PT_ADDTHINGS) != 0 then
-    throw "P_PathTraverse: PT_ADDTHINGS not implemented"
   let earlyout := (flags &&& PT_EARLYOUT) != 0
   let mut gs := { gs0 with validcount := gs0.validcount + 1 }
   let bmap := gs.level.blockmap
@@ -492,6 +519,15 @@ def pathTraverse {σ : Type} (gs0 : GameState) (st0 : σ)
       let (gs1, pts1, ok) ← blockLinesIterator gs pts mapx mapy
         fun gs st li ld => do
           let (st1, ok) ← pitAddLineIntercepts gs st li ld
+          pure (gs, st1, ok)
+      gs := gs1
+      pts := pts1
+      if !ok then
+        return (gs, st0, false)
+    if (flags &&& PT_ADDTHINGS) != 0 then
+      let (gs1, pts1, ok) ← blockThingsIterator gs pts mapx mapy
+        fun gs st mi mo => do
+          let (st1, ok) ← pitAddThingIntercepts st mi mo
           pure (gs, st1, ok)
       gs := gs1
       pts := pts1

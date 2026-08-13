@@ -2,16 +2,20 @@ import Doom.Harness.TraceFormat
 import Doom.Harness.TraceReader
 
 /-!
-P2c-iv behavior lock: DEMO1 `P_SlideMove` + green armor pickup (`SPR_ARM1`).
+P2c-v behavior lock: DEMO1 hitscan open subset through first pistol hit.
 
-E2E contract (public surface `verify --impl real --tics 77`):
-- candidate digests 0..76 must match fixtures/demo1.dig.
-- Negative smoke (next-chunk entry): `verify --tics 78` loud-errors with
-  exact message `A_Chase: missilestate not implemented` (chase-fire /
-  missilestate open subset is intentionally out of scope for this chunk).
+E2E contract (public surface `verify --impl real --tics 88`):
+- candidate digests 0..87 must match fixtures/demo1.dig.
+- Negative smoke (next-chunk entry): `verify --tics 89` loud-errors on
+  door/special (door special / spechit / shoot-special is intentionally
+  out of scope for this chunk).
 - Fixture goldens (tracelib on fixtures/demo1.trc):
-  - @60 armorpoints=100, tid 204 absent, thinker_count=229
-  - player slide XY/mom window 59..75
+  - @77 tid157 state 217 angle 0x952d7840 flags 0x400086, thinker_count=229
+  - @81 cmd_buttons=1, player mo state 154, tid38 state 176, ammo 50
+  - @85 ammo 49, tid231 BLOOD type 38 state 92 tics 7 flags 0x10
+    xyz (-11247242,-3733580,2028214) momz 65536;
+    tid157 hp 25 state 220 flags 0x4000c6
+  - @87 blood alive tics 5 momz -131072; tid157 state 221 tics 3; nsec=0
 -/
 
 open Doom.Harness.TraceFormat
@@ -126,7 +130,7 @@ def main (_args : List String) : IO UInt32 := do
       "--demo", "DEMO1",
       "--ref-digest", (root / "fixtures" / "demo1.dig").toString,
       "--impl", "real",
-      "--tics", "77",
+      "--tics", "88",
       "--out-dir", verifyOut.toString,
       "--ref-trace", (root / "fixtures" / "demo1.trc").toString,
       "--root", root.toString
@@ -148,7 +152,7 @@ def main (_args : List String) : IO UInt32 := do
       "--demo", "DEMO1",
       "--ref-digest", (root / "fixtures" / "demo1.dig").toString,
       "--impl", "real",
-      "--tics", "78",
+      "--tics", "89",
       "--out-dir", boundOut.toString,
       "--root", root.toString
     ]
@@ -156,9 +160,10 @@ def main (_args : List String) : IO UInt32 := do
   }
   let bout := vBound.stdout ++ vBound.stderr
   if !vBound.stderr.isEmpty then IO.eprintln vBound.stderr
-  ok := (← assert "verify --tics 78: missilestate loud-error"
-    (bout.contains "A_Chase: missilestate not implemented")) && ok
-  ok := (← assert "verify --tics 78: did not complete write"
+  ok := (← assert "verify --tics 89: door/special loud-error"
+    (bout.contains "P_Move: spechit/door special path not implemented"
+      && !bout.contains "A_Chase: missilestate not implemented")) && ok
+  ok := (← assert "verify --tics 89: did not complete write"
     (!bout.contains "real: wrote")) && ok
 
   let candTrc := verifyOut / "candidate.trc"
@@ -168,7 +173,7 @@ def main (_args : List String) : IO UInt32 := do
   | Except.error e =>
     ok := (← assert s!"parse candidate.trc ({e})" false) && ok
   | Except.ok recs =>
-    ok := (← assert "candidate has >= 77 tics" (recs.size >= 77)) && ok
+    ok := (← assert "candidate has >= 88 tics" (recs.size >= 88)) && ok
     let mut i : Nat := 0
     while i < 6 && i < recs.size do
       match recs[i]?, expectedRndindex[i]? with
@@ -336,6 +341,133 @@ def main (_args : List String) : IO UInt32 := do
     ok := (← assert "tic 60 tid155 present" found155) && ok
     ok := (← assert "tic 61 tid156 present" found156) && ok
 
+    -- P2c-v hitscan goldens ------------------------------------------------
+    match recs[77]? with
+    | none => ok := (← assert "tic 77 present" false) && ok
+    | some rec =>
+      ok := (← assert "tic 77 thinker_count=229" (rec.thinkers.size == 229)) && ok
+      let mut found157 := false
+      let mut hi : Nat := 0
+      while hi < rec.thinkers.size do
+        match rec.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 157 then
+            match th.mobj with
+            | some mo =>
+              found157 := true
+              ok := (← assert "tic 77 tid157 state=217" (mo.state == 217)) && ok
+              ok := (← assert "tic 77 tid157 angle" (mo.angle == 0x952d7840)) && ok
+              ok := (← assert "tic 77 tid157 flags" (mo.flags == 0x400086)) && ok
+            | none => pure ()
+        | none => pure ()
+        hi := hi + 1
+      ok := (← assert "tic 77 tid157 present" found157) && ok
+    match recs[81]? with
+    | none => ok := (← assert "tic 81 present" false) && ok
+    | some rec =>
+      match rec.players[0]? with
+      | none => ok := (← assert "tic 81 player0" false) && ok
+      | some p =>
+        ok := (← assert "tic 81 cmd_buttons=1" (p.cmdButtons == 1)) && ok
+        ok := (← assert "tic 81 ammo0=50" (p.ammo0 == (50 : Int32).toUInt32)) && ok
+      let mut foundP := false
+      let mut found38 := false
+      let mut hi : Nat := 0
+      while hi < rec.thinkers.size do
+        match rec.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 1 then
+            match th.mobj with
+            | some mo =>
+              foundP := true
+              ok := (← assert "tic 81 player state=154" (mo.state == 154)) && ok
+            | none => pure ()
+          if th.traceId == 38 then
+            match th.mobj with
+            | some mo =>
+              found38 := true
+              ok := (← assert "tic 81 tid38 state=176" (mo.state == 176)) && ok
+            | none => pure ()
+        | none => pure ()
+        hi := hi + 1
+      ok := (← assert "tic 81 player mo present" foundP) && ok
+      ok := (← assert "tic 81 tid38 present" found38) && ok
+    match recs[85]? with
+    | none => ok := (← assert "tic 85 present" false) && ok
+    | some rec =>
+      match rec.players[0]? with
+      | none => ok := (← assert "tic 85 player0" false) && ok
+      | some p =>
+        ok := (← assert "tic 85 ammo0=49" (p.ammo0 == (49 : Int32).toUInt32)) && ok
+      let mut found231 := false
+      let mut found157b := false
+      let mut hi : Nat := 0
+      while hi < rec.thinkers.size do
+        match rec.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 231 then
+            match th.mobj with
+            | some mo =>
+              found231 := true
+              ok := (← assert "tic 85 tid231 type=38" (mo.type_ == 38)) && ok
+              ok := (← assert "tic 85 tid231 state=92" (mo.state == 92)) && ok
+              ok := (← assert "tic 85 tid231 tics=7"
+                (mo.tics == (7 : Int32).toUInt32)) && ok
+              ok := (← assert "tic 85 tid231 flags" (mo.flags == 0x10)) && ok
+              ok := (← assert "tic 85 tid231 x"
+                (mo.x == (-11247242 : Int32).toUInt32)) && ok
+              ok := (← assert "tic 85 tid231 y"
+                (mo.y == (-3733580 : Int32).toUInt32)) && ok
+              ok := (← assert "tic 85 tid231 z"
+                (mo.z == (2028214 : Int32).toUInt32)) && ok
+              ok := (← assert "tic 85 tid231 momz"
+                (mo.momz == (65536 : Int32).toUInt32)) && ok
+            | none => pure ()
+          if th.traceId == 157 then
+            match th.mobj with
+            | some mo =>
+              found157b := true
+              ok := (← assert "tic 85 tid157 hp=25"
+                (mo.health == (25 : Int32).toUInt32)) && ok
+              ok := (← assert "tic 85 tid157 state=220" (mo.state == 220)) && ok
+              ok := (← assert "tic 85 tid157 flags" (mo.flags == 0x4000c6)) && ok
+            | none => pure ()
+        | none => pure ()
+        hi := hi + 1
+      ok := (← assert "tic 85 tid231 BLOOD present" found231) && ok
+      ok := (← assert "tic 85 tid157 present" found157b) && ok
+    match recs[87]? with
+    | none => ok := (← assert "tic 87 present" false) && ok
+    | some rec =>
+      ok := (← assert "tic 87 nsec=0" (rec.sectors.size == 0)) && ok
+      let mut found231b := false
+      let mut found157c := false
+      let mut hi : Nat := 0
+      while hi < rec.thinkers.size do
+        match rec.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 231 then
+            match th.mobj with
+            | some mo =>
+              found231b := true
+              ok := (← assert "tic 87 blood tics=5"
+                (mo.tics == (5 : Int32).toUInt32)) && ok
+              ok := (← assert "tic 87 blood momz"
+                (mo.momz == (-131072 : Int32).toUInt32)) && ok
+            | none => pure ()
+          if th.traceId == 157 then
+            match th.mobj with
+            | some mo =>
+              found157c := true
+              ok := (← assert "tic 87 tid157 state=221" (mo.state == 221)) && ok
+              ok := (← assert "tic 87 tid157 tics=3"
+                (mo.tics == (3 : Int32).toUInt32)) && ok
+            | none => pure ()
+        | none => pure ()
+        hi := hi + 1
+      ok := (← assert "tic 87 blood present" found231b) && ok
+      ok := (← assert "tic 87 tid157 present" found157c) && ok
+
   let digCmp ← IO.Process.output {
     cmd := "python3"
     args := #[
@@ -343,8 +475,8 @@ def main (_args : List String) : IO UInt32 := do
       "import sys; sys.path.insert(0, sys.argv[1]);\n" ++
       "from tracelib import read_digest_stream\n" ++
       "_, c = read_digest_stream(sys.argv[2]); _, r = read_digest_stream(sys.argv[3])\n" ++
-      "assert len(c) >= 77, len(c)\n" ++
-      "bad = [i for i in range(77) if c[i] != r[i]]\n" ++
+      "assert len(c) >= 88, len(c)\n" ++
+      "bad = [i for i in range(88) if c[i] != r[i]]\n" ++
       "print('OK' if not bad else 'BAD ' + str(bad[:5])); sys.exit(0 if not bad else 1)\n",
       (root / "tools").toString,
       candDig.toString,
@@ -353,11 +485,11 @@ def main (_args : List String) : IO UInt32 := do
   }
   IO.println digCmp.stdout
   if !digCmp.stderr.isEmpty then IO.eprintln digCmp.stderr
-  ok := (← assert "digests 0..76 match fixture"
+  ok := (← assert "digests 0..87 match fixture"
     (digCmp.exitCode == 0 && digCmp.stdout.contains "OK")) && ok
 
   if ok then
-    IO.println "ALL DEMO1 DIGEST P2c-iv CHECKS PASSED (K=76)"
+    IO.println "ALL DEMO1 DIGEST P2c-v CHECKS PASSED (K=87)"
     pure 0
   else
     IO.eprintln "SOME DEMO1 DIGEST CHECKS FAILED"

@@ -40,6 +40,10 @@ structure SectorRuntime where
   specialdata : Int32
   /-- Sector `soundtarget` mobj index, or `-1`. -/
   soundtarget : Int32
+  /-- `sector_t::soundtraversed` (`P_RecursiveSound`). -/
+  soundtraversed : Int32
+  /-- Per-sector `validcount` stamp (`P_RecursiveSound`). -/
+  validcount : Int32
   /-- Line indices (copied from geometry). -/
   lines : Array UInt32
   deriving Repr
@@ -115,6 +119,8 @@ def mkSectorRuntime (s : Sector) : SectorRuntime := {
   thinglist := -1
   specialdata := -1
   soundtarget := -1
+  soundtraversed := 0
+  validcount := 0
   lines := s.lines
 }
 
