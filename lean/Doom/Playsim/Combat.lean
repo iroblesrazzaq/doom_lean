@@ -670,6 +670,11 @@ def setPsprite (gs0 : GameState) (playerIdx : Nat) (position : Nat) (stnum0 : UI
           | none => throw "A_Light1: bad player"
           | some pL =>
             gs := setPlayer gs playerIdx { pL with extralight := 1 }
+        else if st.action == action_A_Light0 then
+          match gs.players[playerIdx]? with
+          | none => throw "A_Light0: bad player"
+          | some pL =>
+            gs := setPlayer gs playerIdx { pL with extralight := 0 }
         else if st.action == action_A_ReFire then
           throw "A_ReFire: not implemented"
         else if st.action == action_A_GunFlash then

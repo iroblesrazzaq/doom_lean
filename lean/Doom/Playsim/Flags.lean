@@ -22,6 +22,8 @@ def MF_NOCLIP : UInt32 := 0x1000
 def MF_FLOAT : UInt32 := 0x4000
 def MF_TELEPORT : UInt32 := 0x8000
 def MF_MISSILE : UInt32 := 0x10000
+/-- `MF_DROPPED` (`p_mobj.h`). -/
+def MF_DROPPED : UInt32 := 0x20000
 def MF_CORPSE : UInt32 := 0x100000
 /-- `MF_INFLOAT` (`p_mobj.h`). -/
 def MF_INFLOAT : UInt32 := 0x200000

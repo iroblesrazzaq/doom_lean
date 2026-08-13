@@ -8,6 +8,7 @@ import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sound
+import Doom.Playsim.Spec
 import Doom.Playsim.Thinker
 
 /-!
@@ -29,6 +30,7 @@ open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sound
+open Doom.Playsim.Spec
 open Doom.Playsim.Thinker
 
 /-- Re-export for `PlayerThink` / callers that open `Think`. -/
@@ -87,7 +89,7 @@ def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
             (moCur.x + xmove, moCur.y + ymove, (0 : Int32), (0 : Int32))
         xmove := xmove'
         ymove := ymove'
-        let (gs1, ok) ← tryMove gs mobjIdx ptryx ptryy
+        let (gs1, _, ok) ← tryMove gs mobjIdx ptryx ptryy
         gs := gs1
         if !ok then
           match gs.mobjs[mobjIdx]? with
@@ -351,6 +353,8 @@ def runOneThinker (gs : GameState) (th : Thinker) : Except String GameState := d
     strobeFlashThinker gs th.payload.toNat
   else if th.func == THF_GLOW then
     glowThinker gs th.payload.toNat
+  else if th.func == THF_VERTICALDOOR then
+    verticalDoorThinker gs th.payload.toNat
   else
     throw s!"P_RunThinkers: unimplemented THF {th.func}"
 

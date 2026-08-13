@@ -11,6 +11,7 @@ import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sight
 import Doom.Playsim.Sound
+import Doom.Playsim.Spec
 import Doom.Playsim.Tables
 
 /-!
@@ -36,6 +37,7 @@ open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sight
 open Doom.Playsim.Sound
+open Doom.Playsim.Spec
 open Doom.Playsim.Tables
 
 /-- Re-export `P_AproxDistance` from MapUtil (canonical `p_maputl` home). -/
@@ -94,7 +96,7 @@ private def infoOf (mo : Mobj) : Except String MobjInfo := do
   | none => throw "enemy: missing mobjinfo"
   | some info => pure info
 
-/-- `P_Move` — tryMove + floorz snap; loud-error on spechit/door/MF_FLOAT. -/
+/-- `P_Move` — tryMove + floorz snap; blocked spechit walks `P_UseSpecialLine`. -/
 def pMove (gs0 : GameState) (mobjIdx : Nat) : Except String (GameState × Bool) := do
   match gs0.mobjs[mobjIdx]? with
   | none => throw "P_Move: bad mobj"
@@ -109,7 +111,7 @@ def pMove (gs0 : GameState) (mobjIdx : Nat) : Except String (GameState × Bool) 
     let ys := yspeed.getD dir 0
     let tryx := actor0.x + info.speed * xs
     let tryy := actor0.y + info.speed * ys
-    let (gs1, ok) ← tryMove gs0 mobjIdx tryx tryy
+    let (gs1, scr, ok) ← tryMove gs0 mobjIdx tryx tryy
     if ok then
       match gs1.mobjs[mobjIdx]? with
       | none => throw "P_Move: lost after tryMove"
@@ -119,21 +121,25 @@ def pMove (gs0 : GameState) (mobjIdx : Nat) : Except String (GameState × Bool) 
           mo := { mo with z := mo.floorz }
         pure (setMo gs1 mobjIdx mo, true)
     else
-      -- Re-check position to inspect spechit / floatok (same globals C keeps).
-      let (gs2, scr, posOk) ← checkPosition gs1 mobjIdx tryx tryy
-      match gs2.mobjs[mobjIdx]? with
+      match gs1.mobjs[mobjIdx]? with
       | none => throw "P_Move: lost after blocked"
       | some actor =>
-        let floatok :=
-          if !posOk then false
-          else if (actor.flags &&& MF_NOCLIP) != 0 then false
-          else if scr.tmceilingz - scr.tmfloorz < actor.height then false
-          else true
-        if (actor.flags &&& MF_FLOAT) != 0 && floatok then
+        if (actor.flags &&& MF_FLOAT) != 0 && scr.floatok then
           throw "P_Move: MF_FLOAT height adjust not implemented"
-        if scr.spechit.size != 0 then
-          throw "P_Move: spechit/door special path not implemented"
-        pure (gs2, false)
+        if scr.spechit.size == 0 then
+          return (gs1, false)
+        let mut gs := setMo gs1 mobjIdx { actor with movedir := DI_NODIR }
+        let mut good := false
+        let mut si := scr.spechit.size
+        while si > 0 do
+          si := si - 1
+          match scr.spechit[si]? with
+          | none => throw "P_Move: bad spechit"
+          | some lineIdx =>
+            let (gs2, used) ← useSpecialLine gs mobjIdx lineIdx 0
+            gs := gs2
+            if used then good := true
+        pure (gs, good)
 
 /-- `P_TryWalk`. -/
 def tryWalk (gs0 : GameState) (mobjIdx : Nat) : Except String (GameState × Bool) := do

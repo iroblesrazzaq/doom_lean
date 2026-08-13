@@ -73,6 +73,17 @@ structure Glow where
   direction : Int32
   deriving Repr
 
+/-- `vldoor_t` payload (`p_spec.h`). `specialdata` stores this array index. -/
+structure VerticalDoor where
+  sector : UInt32
+  type_ : Int32
+  topheight : Int32
+  speed : Int32
+  direction : Int32
+  topwait : Int32
+  topcountdown : Int32
+  deriving Repr
+
 structure GameState where
   level : LevelData
   sectors : Array SectorRuntime
@@ -83,6 +94,7 @@ structure GameState where
   lightFlashes : Array LightFlash
   strobes : Array StrobeFlash
   glows : Array Glow
+  verticalDoors : Array VerticalDoor
   rng : RandomState
   /-- Next trace id to assign (`P_AddThinker`); reset to 1 at level load. -/
   traceIdCounter : UInt32
@@ -139,6 +151,7 @@ def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool
     lightFlashes := #[]
     strobes := #[]
     glows := #[]
+    verticalDoors := #[]
     rng := clearRandom
     traceIdCounter := 1
     leveltime := 0

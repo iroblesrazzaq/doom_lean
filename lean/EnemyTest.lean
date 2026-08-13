@@ -9,11 +9,13 @@ import Doom.Playsim.Level
 import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sound
+import Doom.Playsim.Spec
 import Doom.Playsim.Tables
+import Doom.Wad
 
 /-!
-P2c-v implementation tests: A_FaceTarget, P_DamageMobj pain path, plus
-retained P2c-iii helpers.
+P2c-vi implementation tests: FindLowestCeilingSurrounding, T_MovePlane ceiling
+UP, plus retained P2c-v / P2c-iii helpers.
 -/
 
 open Doom.Playsim.Angle
@@ -23,10 +25,13 @@ open Doom.Playsim.Enemy
 open Doom.Playsim.Fixed
 open Doom.Playsim.Flags
 open Doom.Playsim.GameState
+open Doom.Playsim.Level
 open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sound
+open Doom.Playsim.Spec
 open Doom.Playsim.Tables
+open Doom.Wad
 
 def assert (name : String) (cond : Bool) : IO Bool := do
   if cond then
@@ -35,6 +40,12 @@ def assert (name : String) (cond : Bool) : IO Bool := do
   else
     IO.eprintln s!"FAIL: {name}"
     pure false
+
+private def defaultRoot : IO System.FilePath := do
+  let cwd ← IO.currentDir
+  match cwd.components.getLast? with
+  | some "lean" => pure (cwd.parent.getD cwd)
+  | _ => pure cwd
 
 def main (_args : List String) : IO UInt32 := do
   let mut ok := true
@@ -172,7 +183,7 @@ def main (_args : List String) : IO UInt32 := do
   let gsD0 := {
     gsF0 with
     mobjs := #[inflictor, victim]
-    players := arrSet gsF0.players 0 pl
+    players := Doom.Playsim.GameState.arrSet gsF0.players 0 pl
   }
   match damageMobj gsD0 1 (some 0) (some 0) 5 with
   | Except.error e =>
@@ -189,9 +200,173 @@ def main (_args : List String) : IO UInt32 := do
       ok := (← assert "damage retarget inflictor" (v.target == 0)) && ok
       ok := (← assert "damage pain drew P_Random" (gsD1.rng.prndindex == 1)) && ok
 
+  -- wrapping soundorg midpoint (C `(right+left)/2`) -------------------------------
+  ok := (← assert "soundorg midpoint even"
+    (((20 : Int32) + (10 : Int32)) / (2 : Int32) == (15 : Int32))) && ok
+  ok := (← assert "soundorg wrapping Int32.max+1 / 2"
+    ((Int32.maxValue + (1 : Int32)) / (2 : Int32)
+      == ((Int32.minValue : Int32) / (2 : Int32)))) && ok
+
+  -- T_MovePlane ceiling UP ------------------------------------------------
+  let planeLevel : LevelData := {
+    vertexes := #[]
+    sectors := #[{
+      floorheight := 0, ceilingheight := 0
+      floorpic := ByteArray.empty, ceilingpic := ByteArray.empty
+      lightlevel := 0, special := 0, tag := 0
+      lines := #[], blockbox := #[0, 0, 0, 0]
+      soundorgX := 0, soundorgY := 0
+    }]
+    sides := #[]
+    lines := #[]
+    segs := #[]
+    subsectors := #[]
+    nodes := #[]
+    things := #[]
+    blockmap := { originX := 0, originY := 0, width := 0, height := 0, lump := #[] }
+    reject := ByteArray.empty
+  }
+  let gsP0 := Doom.Playsim.GameState.initFromLevel planeLevel 2 #[true, false, false, false] 0
+  match movePlane gsP0 0 VDOORSPEED (10 * FRACUNIT) false 1 1 with
+  | Except.error e =>
+    ok := (← assert s!"T_MovePlane UP step ({e})" false) && ok
+  | Except.ok (gsP1, res) =>
+    ok := (← assert "T_MovePlane UP non-pastdest ok" (res == resultOk)) && ok
+    match gsP1.sectors[0]? with
+    | none => ok := (← assert "T_MovePlane sector" false) && ok
+    | some sec =>
+      ok := (← assert "T_MovePlane ceil += VDOORSPEED"
+        (sec.ceilingheight == VDOORSPEED)) && ok
+  match movePlane gsP0 0 VDOORSPEED FRACUNIT false 1 1 with
+  | Except.error e =>
+    ok := (← assert s!"T_MovePlane pastdest ({e})" false) && ok
+  | Except.ok (gsPast, res) =>
+    ok := (← assert "T_MovePlane UP pastdest" (res == resultPastdest)) && ok
+    match gsPast.sectors[0]? with
+    | none => ok := (← assert "T_MovePlane pastdest sector" false) && ok
+    | some sec =>
+      ok := (← assert "T_MovePlane pastdest snaps to dest"
+        (sec.ceilingheight == FRACUNIT)) && ok
+  match movePlane gsP0 0 VDOORSPEED (10 * FRACUNIT) false 0 1 with
+  | Except.error e =>
+    ok := (← assert "T_MovePlane floor loud-error"
+      (e.contains "floorOrCeiling")) && ok
+  | Except.ok _ =>
+    ok := (← assert "T_MovePlane floor should loud-error" false) && ok
+
+  -- P_UseSpecialLine filters / T_VerticalDoor direction / monster no-close ----
+  let filterLine : Line := {
+    v1 := 0, v2 := 0, flags := 0, special := 11, tag := 0
+    sidenum0 := 0, sidenum1 := 0, dx := 0, dy := 0
+    slopetype := 0, bbox := #[0, 0, 0, 0]
+    frontsector := 0, backsector := 0
+  }
+  let gsU : GameState := {
+    gsP0 with
+    level := { gsP0.level with lines := #[filterLine] }
+    mobjs := #[{ Doom.Playsim.Mobj.empty with player := -1 }]
+  }
+  match useSpecialLine gsU 0 0 1 with
+  | Except.error e =>
+    ok := (← assert s!"UseSpecialLine side ({e})" false) && ok
+  | Except.ok (_, used) =>
+    ok := (← assert "UseSpecialLine side≠0 returns false" (!used)) && ok
+  match useSpecialLine gsU 0 0 0 with
+  | Except.error e =>
+    ok := (← assert s!"UseSpecialLine monster-forbidden ({e})" false) && ok
+  | Except.ok (_, used) =>
+    ok := (← assert "UseSpecialLine monster special 11 false" (!used)) && ok
+  let secretLine : Line := { filterLine with special := 1, flags := ML_SECRET }
+  let gsSecret : GameState := { gsU with level := { gsU.level with lines := #[secretLine] } }
+  match useSpecialLine gsSecret 0 0 0 with
+  | Except.error e =>
+    ok := (← assert s!"UseSpecialLine secret ({e})" false) && ok
+  | Except.ok (_, used) =>
+    ok := (← assert "UseSpecialLine monster secret false" (!used)) && ok
+  let oneSided : Line := { filterLine with special := 1, sidenum1 := -1 }
+  let gsOne : GameState := { gsU with level := { gsU.level with lines := #[oneSided] } }
+  match useSpecialLine gsOne 0 0 0 with
+  | Except.error e =>
+    ok := (← assert "UseSpecialLine 1-sided DR loud-error"
+      (e.contains "1-sided")) && ok
+  | Except.ok _ =>
+    ok := (← assert "UseSpecialLine 1-sided DR should loud-error" false) && ok
+  let gsWait : GameState := {
+    gsP0 with
+    verticalDoors := #[{
+      sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
+      direction := 0, topwait := VDOORWAIT, topcountdown := 0
+    }]
+  }
+  match verticalDoorThinker gsWait 0 with
+  | Except.error e =>
+    ok := (← assert "T_VerticalDoor wait-dir loud-error"
+      (e.contains "direction")) && ok
+  | Except.ok _ =>
+    ok := (← assert "T_VerticalDoor wait-dir should loud-error" false) && ok
+  match gsU.sectors[0]? with
+  | none =>
+    ok := (← assert "gsU has sector 0" false) && ok
+  | some secBusy =>
+    let busyLine : Line := { filterLine with special := 1, sidenum1 := 0 }
+    let busySide : Side := {
+      textureoffset := 0, rowoffset := 0
+      toptexture := ByteArray.empty, bottomtexture := ByteArray.empty
+      midtexture := ByteArray.empty, sector := 0
+    }
+    let gsBusy : GameState := {
+      gsU with
+      level := { gsU.level with lines := #[busyLine], sides := #[busySide] }
+      sectors := Doom.Playsim.GameState.arrSet gsU.sectors 0 { secBusy with specialdata := 0 }
+      verticalDoors := #[{
+        sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
+        direction := 1, topwait := VDOORWAIT, topcountdown := 0
+      }]
+    }
+    match evVerticalDoor gsBusy 0 0 with
+    | Except.error e =>
+      ok := (← assert s!"monster no-close ({e})" false) && ok
+    | Except.ok gsBusy1 =>
+      ok := (← assert "monster no-close does not add thinker"
+        (gsBusy1.thinkers.size == gsBusy.thinkers.size)) && ok
+      match gsBusy1.sectors[0]? with
+      | none => ok := (← assert "monster no-close sector" false) && ok
+      | some sec =>
+        ok := (← assert "monster no-close keeps specialdata"
+          (sec.specialdata == 0)) && ok
+
+  -- P_FindLowestCeilingSurrounding on E1M1 sector 71 -------------------------
+  let root ← defaultRoot
+  let wad ← loadFile (root / "fixtures" / "wads" / "doom1.wad")
+  match checkNumForName wad "E1M1" with
+  | none => ok := (← assert "E1M1 present" false) && ok
+  | some idx =>
+    match (do
+      let things ← mapLumpData wad idx ML_THINGS
+      let linedefs ← mapLumpData wad idx ML_LINEDEFS
+      let sidedefs ← mapLumpData wad idx ML_SIDEDEFS
+      let vertexes ← mapLumpData wad idx ML_VERTEXES
+      let segs ← mapLumpData wad idx ML_SEGS
+      let ssectors ← mapLumpData wad idx ML_SSECTORS
+      let nodes ← mapLumpData wad idx ML_NODES
+      let sectors ← mapLumpData wad idx ML_SECTORS
+      let reject ← mapLumpData wad idx ML_REJECT
+      let blockmap ← mapLumpData wad idx ML_BLOCKMAP
+      buildLevel things linedefs sidedefs vertexes segs ssectors nodes sectors reject blockmap) with
+    | Except.error e =>
+      ok := (← assert s!"E1M1 load ({e})" false) && ok
+    | Except.ok level =>
+      let gsL := Doom.Playsim.GameState.initFromLevel level 3 #[true, false, false, false] 0
+      let lowest := findLowestCeilingSurrounding gsL 71
+      ok := (← assert "E1M1 sec71 FindLowest=4718592"
+        (lowest == (4718592 : Int32))) && ok
+      ok := (← assert "E1M1 sec71 topheight=4456448"
+        (lowest - 4 * FRACUNIT == (4456448 : Int32))) && ok
+      ok := (← assert "VDOORSPEED=2*FRACUNIT" (VDOORSPEED == 2 * FRACUNIT)) && ok
+
   if ok then
-    IO.println "ALL P2c-v ENEMY UNIT CHECKS PASSED"
+    IO.println "ALL P2c-vi ENEMY UNIT CHECKS PASSED"
     pure 0
   else
-    IO.eprintln "SOME P2c-v ENEMY UNIT CHECKS FAILED"
+    IO.eprintln "SOME P2c-vi ENEMY UNIT CHECKS FAILED"
     pure 1

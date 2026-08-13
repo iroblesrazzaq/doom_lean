@@ -77,17 +77,6 @@ def randomizeSpawnTics (tics : Int32) (rng : RandomState) : Int32 × RandomState
   else
     (tics, rng)
 
-/-- `getNextSector` for min-light search. -/
-def getNextSector (ld : Line) (secIdx : Nat) : Option Nat :=
-  if (ld.flags &&& ML_TWOSIDED) == 0 then
-    none
-  else if ld.frontsector >= 0 && idx ld.frontsector == secIdx then
-    if ld.backsector >= 0 then some (idx ld.backsector) else none
-  else if ld.frontsector >= 0 then
-    some (idx ld.frontsector)
-  else
-    none
-
 /-- `P_FindMinSurroundingLight`. -/
 def findMinSurroundingLight (gs : GameState) (secIdx : Nat) (maxLight : Int32) : Int32 :=
   Id.run do

@@ -2,13 +2,12 @@ import Doom.Harness.TraceFormat
 import Doom.Harness.TraceReader
 
 /-!
-P2c-v behavior lock: DEMO1 hitscan open subset through first pistol hit.
+P2c-vi behavior lock: DEMO1 first vertical door through K=91.
 
-E2E contract (public surface `verify --impl real --tics 88`):
-- candidate digests 0..87 must match fixtures/demo1.dig.
-- Negative smoke (next-chunk entry): `verify --tics 89` loud-errors on
-  door/special (door special / spechit / shoot-special is intentionally
-  out of scope for this chunk).
+E2E contract (public surface `verify --impl real --tics 92`):
+- candidate digests 0..91 must match fixtures/demo1.dig.
+- Negative smoke (next-chunk entry): `verify --tics 93` loud-errors on
+  `P_SetMobjState: S_NULL remove not implemented` (blood remove).
 - Fixture goldens (tracelib on fixtures/demo1.trc):
   - @77 tid157 state 217 angle 0x952d7840 flags 0x400086, thinker_count=229
   - @81 cmd_buttons=1, player mo state 154, tid38 state 176, ammo 50
@@ -16,6 +15,8 @@ E2E contract (public surface `verify --impl real --tics 88`):
     xyz (-11247242,-3733580,2028214) momz 65536;
     tid157 hp 25 state 220 flags 0x4000c6
   - @87 blood alive tics 5 momz -131072; tid157 state 221 tics 3; nsec=0
+  - @88 nsec=1 sec71 ceil=131072 tid232 THF_VERTICALDOOR; rndindex 87→88 +2
+  - @91 ceil=524288 tid231 present tics=1
 -/
 
 open Doom.Harness.TraceFormat
@@ -130,7 +131,7 @@ def main (_args : List String) : IO UInt32 := do
       "--demo", "DEMO1",
       "--ref-digest", (root / "fixtures" / "demo1.dig").toString,
       "--impl", "real",
-      "--tics", "88",
+      "--tics", "92",
       "--out-dir", verifyOut.toString,
       "--ref-trace", (root / "fixtures" / "demo1.trc").toString,
       "--root", root.toString
@@ -152,7 +153,7 @@ def main (_args : List String) : IO UInt32 := do
       "--demo", "DEMO1",
       "--ref-digest", (root / "fixtures" / "demo1.dig").toString,
       "--impl", "real",
-      "--tics", "89",
+      "--tics", "93",
       "--out-dir", boundOut.toString,
       "--root", root.toString
     ]
@@ -160,10 +161,10 @@ def main (_args : List String) : IO UInt32 := do
   }
   let bout := vBound.stdout ++ vBound.stderr
   if !vBound.stderr.isEmpty then IO.eprintln vBound.stderr
-  ok := (← assert "verify --tics 89: door/special loud-error"
-    (bout.contains "P_Move: spechit/door special path not implemented"
-      && !bout.contains "A_Chase: missilestate not implemented")) && ok
-  ok := (← assert "verify --tics 89: did not complete write"
+  ok := (← assert "verify --tics 93: S_NULL blood remove loud-error"
+    (bout.contains "P_SetMobjState: S_NULL remove not implemented"
+      && !bout.contains "P_Move: spechit/door special path not implemented")) && ok
+  ok := (← assert "verify --tics 93: did not complete write"
     (!bout.contains "real: wrote")) && ok
 
   let candTrc := verifyOut / "candidate.trc"
@@ -173,7 +174,7 @@ def main (_args : List String) : IO UInt32 := do
   | Except.error e =>
     ok := (← assert s!"parse candidate.trc ({e})" false) && ok
   | Except.ok recs =>
-    ok := (← assert "candidate has >= 88 tics" (recs.size >= 88)) && ok
+    ok := (← assert "candidate has >= 92 tics" (recs.size >= 92)) && ok
     let mut i : Nat := 0
     while i < 6 && i < recs.size do
       match recs[i]?, expectedRndindex[i]? with
@@ -468,6 +469,56 @@ def main (_args : List String) : IO UInt32 := do
       ok := (← assert "tic 87 blood present" found231b) && ok
       ok := (← assert "tic 87 tid157 present" found157c) && ok
 
+    -- P2c-vi first vertical door goldens ------------------------------------
+    match recs[87]?, recs[88]? with
+    | some r87, some r88 =>
+      ok := (← assert "tic 88 rndindex Δ=+2"
+        (r88.rndindex == r87.rndindex + 2)) && ok
+      ok := (← assert "tic 88 nsec=1" (r88.sectors.size == 1)) && ok
+      match r88.sectors[0]? with
+      | none => ok := (← assert "tic 88 sector rec" false) && ok
+      | some sec =>
+        ok := (← assert "tic 88 sec71" (sec.sectorIndex == 71)) && ok
+        ok := (← assert "tic 88 sec71 ceil=131072"
+          (sec.ceilingheight == (131072 : Int32).toUInt32)) && ok
+      let mut found232 := false
+      let mut hi : Nat := 0
+      while hi < r88.thinkers.size do
+        match r88.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 232 then
+            found232 := true
+            ok := (← assert "tic 88 tid232 THF_VERTICALDOOR" (th.func == 2)) && ok
+        | none => pure ()
+        hi := hi + 1
+      ok := (← assert "tic 88 tid232 present" found232) && ok
+    | _, _ =>
+      ok := (← assert "tic 87/88 present for door golden" false) && ok
+    match recs[91]? with
+    | none => ok := (← assert "tic 91 present" false) && ok
+    | some rec =>
+      ok := (← assert "tic 91 nsec=1" (rec.sectors.size == 1)) && ok
+      match rec.sectors[0]? with
+      | none => ok := (← assert "tic 91 sector rec" false) && ok
+      | some sec =>
+        ok := (← assert "tic 91 sec71 ceil=524288"
+          (sec.ceilingheight == (524288 : Int32).toUInt32)) && ok
+      let mut found231d := false
+      let mut hi : Nat := 0
+      while hi < rec.thinkers.size do
+        match rec.thinkers[hi]? with
+        | some th =>
+          if th.traceId == 231 then
+            match th.mobj with
+            | some mo =>
+              found231d := true
+              ok := (← assert "tic 91 blood tics=1"
+                (mo.tics == (1 : Int32).toUInt32)) && ok
+            | none => pure ()
+        | none => pure ()
+        hi := hi + 1
+      ok := (← assert "tic 91 tid231 present" found231d) && ok
+
   let digCmp ← IO.Process.output {
     cmd := "python3"
     args := #[
@@ -475,8 +526,8 @@ def main (_args : List String) : IO UInt32 := do
       "import sys; sys.path.insert(0, sys.argv[1]);\n" ++
       "from tracelib import read_digest_stream\n" ++
       "_, c = read_digest_stream(sys.argv[2]); _, r = read_digest_stream(sys.argv[3])\n" ++
-      "assert len(c) >= 88, len(c)\n" ++
-      "bad = [i for i in range(88) if c[i] != r[i]]\n" ++
+      "assert len(c) >= 92, len(c)\n" ++
+      "bad = [i for i in range(92) if c[i] != r[i]]\n" ++
       "print('OK' if not bad else 'BAD ' + str(bad[:5])); sys.exit(0 if not bad else 1)\n",
       (root / "tools").toString,
       candDig.toString,
@@ -485,11 +536,11 @@ def main (_args : List String) : IO UInt32 := do
   }
   IO.println digCmp.stdout
   if !digCmp.stderr.isEmpty then IO.eprintln digCmp.stderr
-  ok := (← assert "digests 0..87 match fixture"
+  ok := (← assert "digests 0..91 match fixture"
     (digCmp.exitCode == 0 && digCmp.stdout.contains "OK")) && ok
 
   if ok then
-    IO.println "ALL DEMO1 DIGEST P2c-v CHECKS PASSED (K=87)"
+    IO.println "ALL DEMO1 DIGEST P2c-vi CHECKS PASSED (K=91)"
     pure 0
   else
     IO.eprintln "SOME DEMO1 DIGEST CHECKS FAILED"

@@ -20,6 +20,7 @@ import Doom.Playsim.Psprite
 import Doom.Playsim.Combat
 import Doom.Playsim.Sight
 import Doom.Playsim.Sound
+import Doom.Playsim.Spec
 import Doom.Playsim.Enemy
 import Doom.Playsim.Think
 import Doom.Playsim.PlayerThink

@@ -226,28 +226,28 @@ def crossSpecialLine (_gs : GameState) (lineIdx : Nat) (_side : Nat) (_thingIdx 
     Except String Unit :=
   throw s!"P_CrossSpecialLine: special crossed on line {lineIdx} (unexpected)"
 
-/-- `P_TryMove`. -/
+/-- `P_TryMove`. Returns the CheckPosition scratch (`floatok` / `spechit`) as C globals. -/
 def tryMove (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
-    Except String (GameState × Bool) := do
+    Except String (GameState × MapScratch × Bool) := do
   let (gs1, scr0, ok) ← checkPosition gs0 mobjIdx x y
   let mut gs := gs1
   let mut scr := { scr0 with floatok := false }
   if !ok then
-    return (gs, false)
+    return (gs, scr, false)
   match gs.mobjs[mobjIdx]? with
   | none => throw "P_TryMove: bad mobj"
   | some thing =>
     if (thing.flags &&& MF_NOCLIP) == 0 then
       if scr.tmceilingz - scr.tmfloorz < thing.height then
-        return (gs, false)
+        return (gs, scr, false)
       scr := { scr with floatok := true }
       if (thing.flags &&& MF_TELEPORT) == 0 && scr.tmceilingz - thing.z < thing.height then
-        return (gs, false)
+        return (gs, scr, false)
       if (thing.flags &&& MF_TELEPORT) == 0 && scr.tmfloorz - thing.z > 24 * FRACUNIT then
-        return (gs, false)
+        return (gs, scr, false)
       if (thing.flags &&& (MF_DROPOFF ||| MF_FLOAT)) == 0 &&
           scr.tmfloorz - scr.tmdropoffz > 24 * FRACUNIT then
-        return (gs, false)
+        return (gs, scr, false)
     gs ← unsetThingPosition gs mobjIdx
     match gs.mobjs[mobjIdx]? with
     | none => throw "P_TryMove: lost after unset"
@@ -280,7 +280,7 @@ def tryMove (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
                 if side != oldside && ld.special != 0 then
                   crossSpecialLine gs lineIdx oldside mobjIdx
               | _, _ => throw "P_TryMove: spechit geometry missing"
-      pure (gs, true)
+      pure (gs, scr, true)
 
 /-- Slide-move scratch (`bestslidefrac` / `tmxmove` / …). -/
 structure SlideState where
@@ -370,11 +370,11 @@ def stairStep (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
   match gs0.mobjs[mobjIdx]? with
   | none => throw "P_SlideMove: bad mobj for stairstep"
   | some mo =>
-    let (gs1, okY) ← tryMove gs0 mobjIdx mo.x (mo.y + mo.momy)
+    let (gs1, _, okY) ← tryMove gs0 mobjIdx mo.x (mo.y + mo.momy)
     if okY then
       pure gs1
     else
-      let (gs2, _) ← tryMove gs1 mobjIdx (mo.x + mo.momx) mo.y
+      let (gs2, _, _) ← tryMove gs1 mobjIdx (mo.x + mo.momx) mo.y
       pure gs2
 
 /-- One of the three leading-corner `P_PathTraverse` calls in `P_SlideMove`. -/
@@ -432,7 +432,7 @@ def slideMove (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
           if bestFudge > 0 then
             let newx := fixedMul mo.momx bestFudge
             let newy := fixedMul mo.momy bestFudge
-            let (gs1, ok) ← tryMove gs mobjIdx (mo.x + newx) (mo.y + newy)
+            let (gs1, _, ok) ← tryMove gs mobjIdx (mo.x + newx) (mo.y + newy)
             gs := gs1
             if !ok then
               stair := true
@@ -460,10 +460,72 @@ def slideMove (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
                   sl ← hitSlideLine gs sl ld
                   let mo4 := { mo3 with momx := sl.tmxmove, momy := sl.tmymove }
                   gs := { gs with mobjs := setArr gs.mobjs mobjIdx mo4 }
-                  let (gs1, ok) ← tryMove gs mobjIdx (mo4.x + sl.tmxmove) (mo4.y + sl.tmymove)
+                  let (gs1, _, ok) ← tryMove gs mobjIdx (mo4.x + sl.tmxmove) (mo4.y + sl.tmymove)
                   gs := gs1
                   if ok then
                     done := true
   pure gs
+
+/-- `P_ThingHeightClip`. -/
+def thingHeightClip (gs0 : GameState) (mobjIdx : Nat) :
+    Except String (GameState × Bool) := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "P_ThingHeightClip: bad mobj"
+  | some thing0 =>
+    let onfloor := thing0.z == thing0.floorz
+    let (gs1, scr, _) ← checkPosition gs0 mobjIdx thing0.x thing0.y
+    match gs1.mobjs[mobjIdx]? with
+    | none => throw "P_ThingHeightClip: lost after check"
+    | some thing =>
+      let mut mo := { thing with floorz := scr.tmfloorz, ceilingz := scr.tmceilingz }
+      if onfloor then
+        mo := { mo with z := mo.floorz }
+      else if mo.z + mo.height > mo.ceilingz then
+        mo := { mo with z := mo.ceilingz - mo.height }
+      let gs := { gs1 with mobjs := setArr gs1.mobjs mobjIdx mo }
+      pure (gs, mo.ceilingz - mo.floorz >= mo.height)
+
+/-- `PIT_ChangeSector` — height-clip miss on corpses / dropped / crush spray loud-errors. -/
+def pitChangeSector (gs0 : GameState) (nofit0 : Bool) (crunch : Bool)
+    (thingIdx : Nat) (_thing : Mobj) : Except String (GameState × Bool × Bool) := do
+  let (gs1, fit) ← thingHeightClip gs0 thingIdx
+  if fit then
+    return (gs1, nofit0, true)
+  match gs1.mobjs[thingIdx]? with
+  | none => throw "PIT_ChangeSector: lost"
+  | some th =>
+    if th.health <= 0 then
+      throw "PIT_ChangeSector: corpse gibs not implemented"
+    if (th.flags &&& MF_DROPPED) != 0 then
+      throw "PIT_ChangeSector: dropped item remove not implemented"
+    if (th.flags &&& MF_SHOOTABLE) == 0 then
+      return (gs1, nofit0, true)
+    if crunch && (gs1.leveltime &&& 3) == 0 then
+      throw "PIT_ChangeSector: crush spray not implemented"
+    pure (gs1, true, true)
+
+/-- `P_ChangeSector`. -/
+def changeSector (gs0 : GameState) (secIdx : Nat) (crunch : Bool) :
+    Except String (GameState × Bool) := do
+  match gs0.level.sectors[secIdx]? with
+  | none => throw "P_ChangeSector: bad sector"
+  | some geo =>
+    let boxTop := match geo.blockbox[BOXTOP]? with | some v => v | none => (0 : Int32)
+    let boxBottom := match geo.blockbox[BOXBOTTOM]? with | some v => v | none => (0 : Int32)
+    let boxLeft := match geo.blockbox[BOXLEFT]? with | some v => v | none => (0 : Int32)
+    let boxRight := match geo.blockbox[BOXRIGHT]? with | some v => v | none => (0 : Int32)
+    let mut gs := gs0
+    let mut nofit := false
+    let mut x := boxLeft
+    while x <= boxRight do
+      let mut y := boxBottom
+      while y <= boxTop do
+        let (gs1, nofit1, _) ← blockThingsIterator gs nofit x y
+          fun gs st mi mo => pitChangeSector gs st crunch mi mo
+        gs := gs1
+        nofit := nofit1
+        y := y + 1
+      x := x + 1
+    pure (gs, nofit)
 
 end Doom.Playsim.Map

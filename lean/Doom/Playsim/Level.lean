@@ -5,7 +5,7 @@ import Doom.Playsim.Fixed
 
 Level geometry loaded from map lumps (`p_setup.c` / `doomdata.h` / `r_defs.h`).
 Pointers become indices. Texture/flat name resolution, thing→mobj spawning,
-soundorg, and reject matrix usage are deferred.
+and reject matrix usage are deferred.
 -/
 
 namespace Doom.Playsim.Level
@@ -17,6 +17,8 @@ def NF_SUBSECTOR : UInt32 := 0x8000
 
 /-- `doomdata.h` `ML_TWOSIDED`. -/
 def ML_TWOSIDED : Int32 := 4
+/-- `doomdata.h` `ML_SECRET`. -/
+def ML_SECRET : Int32 := 32
 /-- `doomdata.h` `ML_SOUNDBLOCK`. -/
 def ML_SOUNDBLOCK : Int32 := 64
 
@@ -56,6 +58,9 @@ structure Sector where
   lines : Array UInt32
   /-- Map-block bbox `[BOXTOP,BOXBOTTOM,BOXLEFT,BOXRIGHT]` (filled by `groupLines`). -/
   blockbox : Array Int32
+  /-- `sector_t::soundorg` XY (wrapping midpoint of vertex bbox). -/
+  soundorgX : Int32
+  soundorgY : Int32
 
 structure Side where
   textureoffset : Int32
@@ -201,6 +206,8 @@ def loadSectors (data : ByteArray) : Except String (Array Sector) := do
       lightlevel, special, tag
       lines := #[]
       blockbox := #[0, 0, 0, 0]
+      soundorgX := 0
+      soundorgY := 0
     }
     i := i + 1
   pure out
@@ -236,6 +243,17 @@ private def setBBox4 (left right bottom top : Int32) : Array Int32 :=
 
 /-- Non-negative Int32 → Nat index (`toNatClampNeg`). -/
 def i32Idx (x : Int32) : Nat := x.toNatClampNeg
+
+/-- `getNextSector` (`p_spec.c`) — two-sided neighbor or none. -/
+def getNextSector (ld : Line) (secIdx : Nat) : Option Nat :=
+  if (ld.flags &&& ML_TWOSIDED) == 0 then
+    none
+  else if ld.frontsector >= 0 && i32Idx ld.frontsector == secIdx then
+    if ld.backsector >= 0 then some (i32Idx ld.backsector) else none
+  else if ld.frontsector >= 0 then
+    some (i32Idx ld.frontsector)
+  else
+    none
 
 /-- Proof-free `Array.set` that no-ops on OOB (callers check first). -/
 def arrSet {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
@@ -462,8 +480,8 @@ private def addToBox (box : Array Int32) (x y : Int32) : Array Int32 :=
   #[top, bottom, left, right]
 
 /--
-`P_GroupLines`: assign subsector sectors, per-sector line lists, and sector
-blockboxes. Sound origin (`soundorg`) is deferred.
+`P_GroupLines`: assign subsector sectors, per-sector line lists, sector
+blockboxes, and `soundorg` XY.
 -/
 def groupLines (level : LevelData) : Except String LevelData := do
   let mut subsectors := level.subsectors
@@ -551,11 +569,13 @@ def groupLines (level : LevelData) : Except String LevelData := do
               box := addToBox box v2.x v2.y
             | _, _ => throw s!"sector {s} line vertex missing"
         j := j + 1
-      -- soundorg deferred
       let top := match box[BOXTOP]? with | some v => v | none => (0 : Int32)
       let bottom := match box[BOXBOTTOM]? with | some v => v | none => (0 : Int32)
       let left := match box[BOXLEFT]? with | some v => v | none => (0 : Int32)
       let right := match box[BOXRIGHT]? with | some v => v | none => (0 : Int32)
+      -- wrapping Int32 midpoint (`p_setup.c`)
+      let soundorgX := (right + left) / (2 : Int32)
+      let soundorgY := (top + bottom) / (2 : Int32)
       let clampHi (block limit : Int32) : Int32 :=
         if block >= limit then limit - 1 else block
       let clampLo (block : Int32) : Int32 :=
@@ -569,7 +589,7 @@ def groupLines (level : LevelData) : Except String LevelData := do
       let blockLeft :=
         clampLo (ashrMapBlock ((left - bmap.originX) - MAXRADIUS))
       let blockbox := #[blockTop, blockBottom, blockLeft, blockRight]
-      sectors := arrSet sectors s { sec with lines := linesArr, blockbox }
+      sectors := arrSet sectors s { sec with lines := linesArr, blockbox, soundorgX, soundorgY }
     | _, _ => throw s!"sector {s} missing during groupLines"
     s := s + 1
 
