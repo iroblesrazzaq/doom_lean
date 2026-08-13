@@ -8,6 +8,7 @@ import Doom.Playsim.GameState
 import Doom.Playsim.Info
 import Doom.Playsim.Inter
 import Doom.Playsim.Level
+import Doom.Playsim.Map
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
@@ -19,8 +20,8 @@ import Doom.Playsim.Thinker
 import Doom.Wad
 
 /-!
-P2c-viii implementation tests: A_SPosAttack pellets, armor class 1 save,
-P_KillMobj shotgun drop, plus retained P2c-vii / P2c-vi / P2c-v / P2c-iii helpers.
+P2c-ix implementation tests: A_Scream, A_Fall, T_VerticalDoor wait countdown,
+plus retained P2c-viii / P2c-vii / P2c-vi / P2c-v / P2c-iii helpers.
 -/
 
 open Doom.Playsim.Angle
@@ -33,6 +34,7 @@ open Doom.Playsim.GameState
 open Doom.Playsim.Info
 open Doom.Playsim.Inter
 open Doom.Playsim.Level
+open Doom.Playsim.Map
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
@@ -301,19 +303,123 @@ def main (_args : List String) : IO UInt32 := do
       (e.contains "1-sided")) && ok
   | Except.ok _ =>
     ok := (← assert "UseSpecialLine 1-sided DR should loud-error" false) && ok
-  let gsWait : GameState := {
+  let gsWait0 : GameState := {
     gsP0 with
     verticalDoors := #[{
       sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
       direction := 0, topwait := VDOORWAIT, topcountdown := 0
     }]
   }
-  match verticalDoorThinker gsWait 0 with
+  match verticalDoorThinker gsWait0 0 with
   | Except.error e =>
-    ok := (← assert "T_VerticalDoor wait-dir loud-error"
-      (e.contains "direction")) && ok
+    ok := (← assert s!"T_VerticalDoor wait wrap 0→-1 ({e})" false) && ok
+  | Except.ok gsW0 =>
+    match gsW0.verticalDoors[0]? with
+    | none => ok := (← assert "wait wrap door present" false) && ok
+    | some d =>
+      ok := (← assert "T_VerticalDoor wait wrap 0→-1"
+        (d.topcountdown == (-1 : Int32) && d.direction == 0)) && ok
+  let gsWaitMin : GameState := {
+    gsP0 with
+    verticalDoors := #[{
+      sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
+      direction := 0, topwait := VDOORWAIT, topcountdown := Int32.minValue
+    }]
+  }
+  match verticalDoorThinker gsWaitMin 0 with
+  | Except.error e =>
+    ok := (← assert s!"T_VerticalDoor wait wrap min ({e})" false) && ok
+  | Except.ok gsWMin =>
+    match gsWMin.verticalDoors[0]? with
+    | none => ok := (← assert "wait wrap min door present" false) && ok
+    | some d =>
+      ok := (← assert "T_VerticalDoor wait wrap minValue→maxValue"
+        (d.topcountdown == Int32.maxValue && d.direction == 0)) && ok
+  let gsWaitN : GameState := {
+    gsP0 with
+    verticalDoors := #[{
+      sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
+      direction := 0, topwait := VDOORWAIT, topcountdown := VDOORWAIT
+    }]
+  }
+  match verticalDoorThinker gsWaitN 0 with
+  | Except.error e =>
+    ok := (← assert s!"T_VerticalDoor wait decrement ({e})" false) && ok
+  | Except.ok gsWN =>
+    match gsWN.verticalDoors[0]? with
+    | none => ok := (← assert "wait decrement door present" false) && ok
+    | some d =>
+      ok := (← assert "T_VerticalDoor wait 150→149"
+        (d.topcountdown == (149 : Int32) && d.direction == 0)) && ok
+  let mut gsWaitLock := gsWaitN
+  let mut waitOk := true
+  let mut wi : Nat := 0
+  while wi < 13 && waitOk do
+    match verticalDoorThinker gsWaitLock 0 with
+    | Except.error e =>
+      ok := (← assert s!"T_VerticalDoor wait 13-tick lock ({e})" false) && ok
+      waitOk := false
+    | Except.ok gsNext =>
+      gsWaitLock := gsNext
+    wi := wi + 1
+  if waitOk then
+    match gsWaitLock.verticalDoors[0]? with
+    | none => ok := (← assert "wait 13-tick door present" false) && ok
+    | some d =>
+      ok := (← assert "T_VerticalDoor wait remaining 137 at tic 134"
+        (d.topcountdown == (137 : Int32) && d.direction == 0)) && ok
+  let gsWaitZero : GameState := {
+    gsP0 with
+    verticalDoors := #[{
+      sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
+      direction := 0, topwait := VDOORWAIT, topcountdown := 1
+    }]
+  }
+  match verticalDoorThinker gsWaitZero 0 with
+  | Except.error e =>
+    ok := (← assert "T_VerticalDoor wait-expire loud-error"
+      (e == "T_VerticalDoor: direction -1 not implemented")) && ok
   | Except.ok _ =>
-    ok := (← assert "T_VerticalDoor wait-dir should loud-error" false) && ok
+    ok := (← assert "T_VerticalDoor wait-expire should loud-error" false) && ok
+  let gsDown : GameState := {
+    gsP0 with
+    verticalDoors := #[{
+      sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
+      direction := -1, topwait := VDOORWAIT, topcountdown := 0
+    }]
+  }
+  match verticalDoorThinker gsDown 0 with
+  | Except.error e =>
+    ok := (← assert "T_VerticalDoor down-dir loud-error"
+      (e == "T_VerticalDoor: direction -1 not implemented")) && ok
+  | Except.ok _ =>
+    ok := (← assert "T_VerticalDoor down-dir should loud-error" false) && ok
+  -- Monster walk over non-activatable special is a C no-op (E1M5 line 271 spec 22).
+  let walkLine : Line := { filterLine with special := 22 }
+  let gsWalk : GameState := { gsU with level := { gsU.level with lines := #[walkLine] } }
+  match crossSpecialLine gsWalk 0 0 0 with
+  | Except.error e =>
+    ok := (← assert s!"monster walk spec 22 no-op ({e})" false) && ok
+  | Except.ok () =>
+    ok := (← assert "monster walk spec 22 no-op" true) && ok
+  let raiseLine : Line := { filterLine with special := 4 }
+  let gsRaise : GameState := { gsU with level := { gsU.level with lines := #[raiseLine] } }
+  match crossSpecialLine gsRaise 0 0 0 with
+  | Except.error e =>
+    ok := (← assert "monster walk spec 4 loud-error"
+      (e.contains "P_CrossSpecialLine")) && ok
+  | Except.ok () =>
+    ok := (← assert "monster walk spec 4 should loud-error" false) && ok
+  let gsWalkP : GameState := {
+    gsWalk with
+    mobjs := #[{ Doom.Playsim.Mobj.empty with player := 0 }]
+  }
+  match crossSpecialLine gsWalkP 0 0 0 with
+  | Except.error e =>
+    ok := (← assert "player walk spec 22 loud-error"
+      (e.contains "P_CrossSpecialLine")) && ok
+  | Except.ok () =>
+    ok := (← assert "player walk spec 22 should loud-error" false) && ok
   match gsU.sectors[0]? with
   | none =>
     ok := (← assert "gsU has sector 0" false) && ok
@@ -642,16 +748,134 @@ def main (_args : List String) : IO UInt32 := do
   ok := (← assert "Enemy does not import Combat"
     (!enemySrc.contains "import Doom.Playsim.Combat")) && ok
 
-  -- Named A_Scream loud-error -----------------------------------------------
-  match runMobjAction gsA0 0 action_A_Scream with
+  -- Named A_Scream / A_Fall ------------------------------------------------
+  let screamListener := {
+    Doom.Playsim.Mobj.empty with
+    x := 0, y := 0, player := 0, typeId := 0
+  }
+  let screamActor := {
+    Doom.Playsim.Mobj.empty with
+    x := FRACUNIT, y := 0, typeId := MT_POSSESSED, player := -1
+    flags := MF_SOLID ||| MF_SHOOTABLE
+  }
+  let screamPl := {
+    Doom.Playsim.Player.empty with
+    mo := 0, playerstate := PST_LIVE, health := 100
+    pendingweapon := wp_nochange
+  }
+  let gsSc : GameState := {
+    gsA0 with
+    mobjs := #[screamListener, screamActor]
+    players := Doom.Playsim.GameState.arrSet gsA0.players 0 screamPl
+  }
+  match aScream gsSc 1 with
   | Except.error e =>
-    ok := (← assert "A_Scream named loud-error"
-      (e == "A_Scream: not implemented")) && ok
-  | Except.ok _ =>
-    ok := (← assert "A_Scream should loud-error" false) && ok
+    ok := (← assert s!"A_Scream podth ({e})" false) && ok
+  | Except.ok gsSc1 =>
+    ok := (← assert "A_Scream podth P_Random + pitch"
+      (gsSc1.rng.prndindex == 1 && gsSc1.rng.rndindex == 1)) && ok
+  let gsSilent : GameState := {
+    gsSc with
+    mobjs := #[screamListener, { screamActor with typeId := 4 }]
+  }
+  match aScream gsSilent 1 with
+  | Except.error e =>
+    ok := (← assert s!"A_Scream deathsound 0 ({e})" false) && ok
+  | Except.ok gsSilent1 =>
+    ok := (← assert "A_Scream deathsound 0 no RNG"
+      (gsSilent1.rng.prndindex == 0 && gsSilent1.rng.rndindex == 0)) && ok
+  let gsBg : GameState := {
+    gsSc with
+    mobjs := #[screamListener, { screamActor with typeId := 11 }]
+  }
+  match aScream gsBg 1 with
+  | Except.error e =>
+    ok := (← assert s!"A_Scream bgdth ({e})" false) && ok
+  | Except.ok gsBg1 =>
+    ok := (← assert "A_Scream bgdth P_Random + pitch"
+      (gsBg1.rng.prndindex == 1 && gsBg1.rng.rndindex == 1)) && ok
+  let gsElse : GameState := {
+    gsSc with
+    mobjs := #[screamListener, { screamActor with typeId := 12 }]
+  }
+  match aScream gsElse 1 with
+  | Except.error e =>
+    ok := (← assert s!"A_Scream default deathsound ({e})" false) && ok
+  | Except.ok gsElse1 =>
+    ok := (← assert "A_Scream default deathsound pitch only"
+      (gsElse1.rng.prndindex == 0 && gsElse1.rng.rndindex == 1)) && ok
+  let gsFar : GameState := {
+    gsSc with
+    mobjs := #[
+      screamListener,
+      { screamActor with x := 1201 * FRACUNIT }
+    ]
+  }
+  match aScream gsFar 1 with
+  | Except.error e =>
+    ok := (← assert s!"A_Scream inaudible ({e})" false) && ok
+  | Except.ok gsFar1 =>
+    ok := (← assert "A_Scream inaudible skips pitch"
+      (gsFar1.rng.prndindex == 1 && gsFar1.rng.rndindex == 0)) && ok
+  let gsBossFar : GameState := {
+    gsSc with
+    mobjs := #[
+      screamListener,
+      { screamActor with x := 1201 * FRACUNIT, typeId := MT_SPIDER }
+    ]
+  }
+  match aScream gsBossFar 1 with
+  | Except.error e =>
+    ok := (← assert s!"A_Scream boss full-vol ({e})" false) && ok
+  | Except.ok gsBoss1 =>
+    ok := (← assert "A_Scream boss full-vol pitch always"
+      (gsBoss1.rng.prndindex == 0 && gsBoss1.rng.rndindex == 1)) && ok
+  let gsCybFar : GameState := {
+    gsSc with
+    mobjs := #[
+      screamListener,
+      { screamActor with x := 1201 * FRACUNIT, typeId := MT_CYBORG }
+    ]
+  }
+  match aScream gsCybFar 1 with
+  | Except.error e =>
+    ok := (← assert s!"A_Scream cyborg full-vol ({e})" false) && ok
+  | Except.ok gsCyb1 =>
+    ok := (← assert "A_Scream cyborg full-vol pitch always"
+      (gsCyb1.rng.prndindex == 0 && gsCyb1.rng.rndindex == 1)) && ok
+  match runMobjAction gsSc 1 action_A_Scream with
+  | Except.error e =>
+    ok := (← assert s!"A_Scream dispatch ({e})" false) && ok
+  | Except.ok gsDisp =>
+    ok := (← assert "A_Scream dispatch RNG"
+      (gsDisp.rng.prndindex == 1 && gsDisp.rng.rndindex == 1)) && ok
+  let fallFlags := MF_SOLID ||| MF_SHOOTABLE ||| MF_COUNTKILL ||| MF_CORPSE
+  let gsFall : GameState := {
+    gsA0 with
+    mobjs := #[{ screamActor with flags := fallFlags }]
+  }
+  match aFall gsFall 0 with
+  | Except.error e =>
+    ok := (← assert s!"A_Fall ({e})" false) && ok
+  | Except.ok gsFall1 =>
+    match gsFall1.mobjs[0]? with
+    | none => ok := (← assert "A_Fall mobj present" false) && ok
+    | some mo =>
+      ok := (← assert "A_Fall clears MF_SOLID" ((mo.flags &&& MF_SOLID) == 0)) && ok
+      ok := (← assert "A_Fall keeps other flags"
+        (mo.flags == (fallFlags &&& (~~~MF_SOLID)))) && ok
+  match runMobjAction gsFall 0 action_A_Fall with
+  | Except.error e =>
+    ok := (← assert s!"A_Fall dispatch ({e})" false) && ok
+  | Except.ok gsFallD =>
+    match gsFallD.mobjs[0]? with
+    | none => ok := (← assert "A_Fall dispatch mobj" false) && ok
+    | some mo =>
+      ok := (← assert "A_Fall dispatch clears MF_SOLID"
+        ((mo.flags &&& MF_SOLID) == 0)) && ok
 
   if ok then
-    IO.println "ALL P2c-viii ENEMY UNIT CHECKS PASSED"
+    IO.println "ALL P2c-ix ENEMY UNIT CHECKS PASSED"
     pure 0
   else
     IO.eprintln "SOME P2c-vi ENEMY UNIT CHECKS FAILED"

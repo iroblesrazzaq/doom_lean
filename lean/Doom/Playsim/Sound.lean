@@ -27,6 +27,11 @@ def sfx_posit2 : Nat := 37
 def sfx_posit3 : Nat := 38
 def sfx_bgsit1 : Nat := 39
 def sfx_bgsit2 : Nat := 40
+def sfx_podth1 : Nat := 59
+def sfx_podth2 : Nat := 60
+def sfx_podth3 : Nat := 61
+def sfx_bgdth1 : Nat := 62
+def sfx_bgdth2 : Nat := 63
 def sfx_tink : Nat := 87
 
 /--

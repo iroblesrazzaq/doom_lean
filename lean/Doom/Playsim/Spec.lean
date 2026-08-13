@@ -12,7 +12,8 @@ import Doom.Playsim.Thinker
 
 Open subset of `p_spec.c` / `p_switch.c` / `p_doors.c` / `p_floor.c` for the
 first DEMO1 vertical door: surrounding-ceiling search, `P_UseSpecialLine`,
-`EV_VerticalDoor` / `T_VerticalDoor`, and ceiling-UP `T_MovePlane`.
+`EV_VerticalDoor` / `T_VerticalDoor` (UP + wait countdown), and ceiling-UP
+`T_MovePlane`.
 -/
 
 namespace Doom.Playsim.Spec
@@ -185,21 +186,29 @@ def useSpecialLine (gs0 : GameState) (thingIdx : Nat) (lineIdx : Nat) (side : In
     else
       throw s!"P_UseSpecialLine: special {ld.special} not implemented"
 
-/-- `T_VerticalDoor` — `direction == 1` and `vld_normal` only. -/
+/-- `T_VerticalDoor` — wait (`direction == 0`) countdown, then UP `vld_normal`. -/
 def verticalDoorThinker (gs0 : GameState) (payload : Nat) : Except String GameState := do
   match gs0.verticalDoors[payload]? with
   | none => throw "T_VerticalDoor: bad payload"
   | some door0 =>
-    if door0.direction != 1 then
+    if door0.direction == 0 then
+      let next := door0.topcountdown - (1 : Int32)
+      if next != 0 then
+        let door := { door0 with topcountdown := next }
+        pure { gs0 with verticalDoors := GameState.arrSet gs0.verticalDoors payload door }
+      else
+        throw "T_VerticalDoor: direction -1 not implemented"
+    else if door0.direction != 1 then
       throw s!"T_VerticalDoor: direction {door0.direction} not implemented"
-    if door0.type_ != vld_normal then
+    else if door0.type_ != vld_normal then
       throw s!"T_VerticalDoor: type {door0.type_} not implemented"
-    let (gs1, res) ←
-      movePlane gs0 door0.sector.toNat door0.speed door0.topheight false 1 1
-    if res == resultPastdest then
-      let door := { door0 with direction := 0, topcountdown := door0.topwait }
-      pure { gs1 with verticalDoors := GameState.arrSet gs1.verticalDoors payload door }
     else
-      pure gs1
+      let (gs1, res) ←
+        movePlane gs0 door0.sector.toNat door0.speed door0.topheight false 1 1
+      if res == resultPastdest then
+        let door := { door0 with direction := 0, topcountdown := door0.topwait }
+        pure { gs1 with verticalDoors := GameState.arrSet gs1.verticalDoors payload door }
+      else
+        pure gs1
 
 end Doom.Playsim.Spec

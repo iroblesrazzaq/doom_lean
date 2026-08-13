@@ -21,9 +21,10 @@ import Doom.Playsim.Tables
 # Doom.Playsim.Enemy
 
 `p_enemy.c` / `p_inter.c` open subset for DEMO1 wake + chase through first
-kill (P2c-viii): look/chase helpers, `A_SPosAttack`, `P_DamageMobj` /
-`P_KillMobj`, plus `P_SetMobjState` (S_NULL → `Inter.removeMobj`) / action
-dispatch (avoids a Think↔Enemy cycle). Hitscan must not import this module.
+kill death frames (P2c-ix): look/chase helpers, `A_SPosAttack`, `A_Scream` /
+`A_Fall`, `P_DamageMobj` / `P_KillMobj`, plus `P_SetMobjState` (S_NULL →
+`Inter.removeMobj`) / action dispatch (avoids a Think↔Enemy cycle). Hitscan
+must not import this module.
 -/
 
 namespace Doom.Playsim.Enemy
@@ -456,6 +457,44 @@ def aPain (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
     else
       pure gs0
 
+/-- `A_Scream`. -/
+def aScream (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_Scream: bad mobj"
+  | some actor =>
+    let info ← infoOf actor
+    if info.deathsound == 0 then
+      return gs0
+    let podth1 : Int32 := Int32.ofNat sfx_podth1
+    let podth2 : Int32 := Int32.ofNat sfx_podth2
+    let podth3 : Int32 := Int32.ofNat sfx_podth3
+    let bgdth1 : Int32 := Int32.ofNat sfx_bgdth1
+    let bgdth2 : Int32 := Int32.ofNat sfx_bgdth2
+    let deathsound := info.deathsound
+    let (sound, rng) :=
+      if deathsound == podth1 || deathsound == podth2 || deathsound == podth3 then
+        let (r, rng) := pRandom gs0.rng
+        (podth1 + r % 3, rng)
+      else if deathsound == bgdth1 || deathsound == bgdth2 then
+        let (r, rng) := pRandom gs0.rng
+        (bgdth1 + r % 2, rng)
+      else
+        (deathsound, gs0.rng)
+    let gs := { gs0 with rng }
+    let fullVol := actor.typeId == MT_SPIDER || actor.typeId == MT_CYBORG
+    pure {
+      gs with
+      rng := startSoundPitchRngMaybe gs.rng sound.toNatClampNeg
+        (fullVol || originAudible gs mobjIdx)
+    }
+
+/-- `A_Fall` — clear `MF_SOLID` only. -/
+def aFall (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_Fall: bad mobj"
+  | some actor =>
+    pure (setMo gs0 mobjIdx { actor with flags := actor.flags &&& (~~~MF_SOLID) })
+
 /-- `P_RecursiveSound` — fuel-bounded DFS matching C call order. -/
 def recursiveSoundFuel (gs0 : GameState) (secIdx : Nat) (soundblocks : Int32)
     (targetIdx : Int32) (fuel : Nat) : Except String GameState :=
@@ -851,7 +890,9 @@ def runMobjActionFuel (gs0 : GameState) (mobjIdx : Nat) (action : ActionId) (fue
     else if action == action_A_SPosAttack then
       aSPosAttack gs0 mobjIdx
     else if action == action_A_Scream then
-      throw "A_Scream: not implemented"
+      aScream gs0 mobjIdx
+    else if action == action_A_Fall then
+      aFall gs0 mobjIdx
     else
       throw s!"P_MobjThinker/SetMobjState: unimplemented action {action}"
 

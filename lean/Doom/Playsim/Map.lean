@@ -221,10 +221,26 @@ def checkPosition (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
           bx := bx + 1
         pure (gs, scr, true)
 
-/-- `P_CrossSpecialLine` — none expected before DEMO1 fire/doors. -/
-def crossSpecialLine (_gs : GameState) (lineIdx : Nat) (_side : Nat) (_thingIdx : Nat) :
-    Except String Unit :=
-  throw s!"P_CrossSpecialLine: special crossed on line {lineIdx} (unexpected)"
+/--
+`P_CrossSpecialLine` — monster early-out from `p_spec.c`.
+Non-player things only activate specials 4/10/39/88/97/125/126; anything
+else is a no-op. Player (and those monster-ok specials) stay loud-errors
+until the corresponding EV_* is implemented.
+-/
+def crossSpecialLine (gs : GameState) (lineIdx : Nat) (_side : Nat) (thingIdx : Nat) :
+    Except String Unit := do
+  match gs.mobjs[thingIdx]?, gs.level.lines[lineIdx]? with
+  | none, _ => throw "P_CrossSpecialLine: bad thing"
+  | _, none => throw "P_CrossSpecialLine: bad line"
+  | some thing, some ld =>
+    if thing.player < 0 then
+      let spec := ld.special
+      let monsterOk :=
+        spec == 4 || spec == 10 || spec == 39 || spec == 88
+        || spec == 97 || spec == 125 || spec == 126
+      if !monsterOk then
+        return ()
+    throw s!"P_CrossSpecialLine: special crossed on line {lineIdx} (unexpected)"
 
 /-- `P_TryMove`. Returns the CheckPosition scratch (`floatok` / `spechit`) as C globals. -/
 def tryMove (gs0 : GameState) (mobjIdx : Nat) (x y : Int32) :
