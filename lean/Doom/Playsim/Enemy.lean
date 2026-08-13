@@ -2,6 +2,7 @@ import Doom.Playsim.Angle
 import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
+import Doom.Playsim.Hitscan
 import Doom.Playsim.Info
 import Doom.Playsim.Inter
 import Doom.Playsim.Level
@@ -12,15 +13,17 @@ import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sight
 import Doom.Playsim.Sound
+import Doom.Playsim.Spawn
 import Doom.Playsim.Spec
 import Doom.Playsim.Tables
 
 /-!
 # Doom.Playsim.Enemy
 
-`p_enemy.c` open subset for DEMO1 wake + chase (P2c-iii) through S_NULL remove
-(P2c-vii): look/chase helpers, `A_Look` / `A_Chase`, plus `P_SetMobjState`
-(S_NULL → `Inter.removeMobj`) / action dispatch (avoids a Think↔Enemy cycle).
+`p_enemy.c` / `p_inter.c` open subset for DEMO1 wake + chase through first
+kill (P2c-viii): look/chase helpers, `A_SPosAttack`, `P_DamageMobj` /
+`P_KillMobj`, plus `P_SetMobjState` (S_NULL → `Inter.removeMobj`) / action
+dispatch (avoids a Think↔Enemy cycle). Hitscan must not import this module.
 -/
 
 namespace Doom.Playsim.Enemy
@@ -59,12 +62,30 @@ def DI_SOUTH : Int32 := 6
 def DI_SOUTHEAST : Int32 := 7
 def DI_NODIR : Int32 := 8
 
-/-- `mobjtype_t` ordinals used by missile-range early-outs. -/
+/-- `mobjtype_t` ordinals used by missile-range early-outs and kill drops. -/
+def MT_POSSESSED : Int32 := 1
+def MT_SHOTGUY : Int32 := 2
 def MT_VILE : Int32 := 3
 def MT_UNDEAD : Int32 := 5
+def MT_CHAINGUY : Int32 := 10
 def MT_SKULL : Int32 := 18
 def MT_SPIDER : Int32 := 19
 def MT_CYBORG : Int32 := 21
+def MT_WOLFSS : Int32 := 23
+def MT_CLIP : Int32 := 63
+def MT_CHAINGUN : Int32 := 73
+def MT_SHOTGUN : Int32 := 77
+
+/-- `p_local.h` `BASETHRESHOLD`. -/
+def BASETHRESHOLD : Int32 := 100
+/-- `CF_GODMODE` (`doomdef.h`). -/
+def CF_GODMODE : Int32 := 2
+/-- `pw_invulnerability` (`powertype_t`). -/
+def pw_invulnerability : Nat := 0
+
+/-- `P_SetMobjState` callback so damage/kill can live outside the mutual block. -/
+abbrev SetMobjStateFn :=
+  GameState → Nat → UInt32 → Except String (GameState × Bool)
 
 /-- `opposite[]` (`p_enemy.c`). -/
 def opposite : Array Int32 := #[
@@ -90,6 +111,9 @@ private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
 
 private def setMo (gs : GameState) (i : Nat) (mo : Mobj) : GameState :=
   { gs with mobjs := setArr gs.mobjs i mo }
+
+private def setPlayer (gs : GameState) (i : Nat) (p : Player) : GameState :=
+  { gs with players := setArr gs.players i p }
 
 /-- Resolve `mobjinfo` for a live mobj. -/
 private def infoOf (mo : Mobj) : Except String MobjInfo := do
@@ -483,6 +507,294 @@ def noiseAlert (gs0 : GameState) (targetIdx emitterIdx : Nat) : Except String Ga
       let gs := { gs0 with validcount := gs0.validcount + 1 }
       recursiveSoundFuel gs ss.sector.toNat 0 targetIdx.toInt32 1000000
 
+/-- `P_KillMobj` (player-target is a loud-error). -/
+def killMobjWith (setSt : SetMobjStateFn) (gs0 : GameState) (sourceIdx : Option Nat)
+    (targetIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[targetIdx]? with
+  | none => throw "P_KillMobj: bad target"
+  | some target0 =>
+    let mut flags := target0.flags &&& (~~~(MF_SHOOTABLE ||| MF_FLOAT ||| MF_SKULLFLY))
+    if target0.typeId != MT_SKULL then
+      flags := flags &&& (~~~MF_NOGRAVITY)
+    flags := flags ||| MF_CORPSE ||| MF_DROPOFF
+    let target := { target0 with flags, height := target0.height >>> 2 }
+    let mut gs := setMo gs0 targetIdx target
+    if target.player >= 0 then
+      throw "P_KillMobj: player target not implemented"
+    let countKill := (target.flags &&& MF_COUNTKILL) != 0
+    match sourceIdx with
+    | some si =>
+      match gs.mobjs[si]? with
+      | some src =>
+        if src.player >= 0 then
+          if countKill then
+            match gs.players[src.player.toNatClampNeg]? with
+            | none => throw "P_KillMobj: bad source player"
+            | some pl =>
+              gs := setPlayer gs src.player.toNatClampNeg { pl with killcount := pl.killcount + 1 }
+        else if !gs.netgame && countKill then
+          match gs.players[0]? with
+          | none => throw "P_KillMobj: missing player 0"
+          | some pl =>
+            gs := setPlayer gs 0 { pl with killcount := pl.killcount + 1 }
+      | none =>
+        if !gs.netgame && countKill then
+          match gs.players[0]? with
+          | none => throw "P_KillMobj: missing player 0"
+          | some pl =>
+            gs := setPlayer gs 0 { pl with killcount := pl.killcount + 1 }
+    | none =>
+      if !gs.netgame && countKill then
+        match gs.players[0]? with
+        | none => throw "P_KillMobj: missing player 0"
+        | some pl =>
+          gs := setPlayer gs 0 { pl with killcount := pl.killcount + 1 }
+    match gs.mobjs[targetIdx]? with
+    | none => throw "P_KillMobj: lost before deathstate"
+    | some t1 =>
+      let info ←
+        match mobjinfo[t1.typeId.toNatClampNeg]? with
+        | some i => pure i
+        | none => throw "P_KillMobj: missing mobjinfo"
+      let deathSt :=
+        if t1.health < -info.spawnhealth && info.xdeathstate != 0 then
+          info.xdeathstate
+        else
+          info.deathstate
+      let (gs1, _) ← setSt gs targetIdx deathSt
+      gs := gs1
+      match gs.mobjs[targetIdx]? with
+      | none => throw "P_KillMobj: lost after deathstate"
+      | some t2 =>
+        let (r, rng) := pRandom gs.rng
+        let mut tics := t2.tics - (r &&& 3)
+        if tics < 1 then tics := 1
+        gs := { setMo gs targetIdx { t2 with tics } with rng }
+        let item? : Option Int32 :=
+          if t2.typeId == MT_WOLFSS || t2.typeId == MT_POSSESSED then some MT_CLIP
+          else if t2.typeId == MT_SHOTGUY then some MT_SHOTGUN
+          else if t2.typeId == MT_CHAINGUY then some MT_CHAINGUN
+          else none
+        match item? with
+        | none => pure gs
+        | some item =>
+          match gs.mobjs[targetIdx]? with
+          | none => throw "P_KillMobj: lost before drop"
+          | some t3 =>
+            let (gsD, dropIdx) ← Spawn.spawnMobj gs t3.x t3.y Spawn.ONFLOORZ item
+            match gsD.mobjs[dropIdx]? with
+            | none => throw "P_KillMobj: lost drop"
+            | some drop =>
+              pure (setMo gsD dropIdx { drop with flags := drop.flags ||| MF_DROPPED })
+
+/-- `P_DamageMobj` (player victim + kill). -/
+def damageMobjWith (setSt : SetMobjStateFn) (gs0 : GameState) (targetIdx : Nat)
+    (inflictorIdx sourceIdx : Option Nat) (damage0 : Int32) : Except String GameState := do
+  match gs0.mobjs[targetIdx]? with
+  | none => throw "P_DamageMobj: bad target"
+  | some target0 =>
+    if (target0.flags &&& MF_SHOOTABLE) == 0 then
+      return gs0
+    if target0.health <= 0 then
+      return gs0
+    let mut gs := gs0
+    let mut target := target0
+    let mut damage := damage0
+    if (target.flags &&& MF_SKULLFLY) != 0 then
+      target := { target with momx := 0, momy := 0, momz := 0 }
+      gs := setMo gs targetIdx target
+    if target.player >= 0 && gs.gameskill == sk_baby then
+      damage := damage >>> 1
+    let skipThrust :=
+      match inflictorIdx with
+      | none => true
+      | some _ =>
+        if (target.flags &&& MF_NOCLIP) != 0 then true
+        else
+          match sourceIdx with
+          | none => false
+          | some si =>
+            match gs.mobjs[si]? with
+            | none => false
+            | some src =>
+              if src.player < 0 then false
+              else
+                match gs.players[src.player.toNatClampNeg]? with
+                | some pl => pl.readyweapon == wp_chainsaw
+                | none => false
+    if !skipThrust then
+      match inflictorIdx, gs.mobjs[targetIdx]? with
+      | some ii, some tgt =>
+        match gs.mobjs[ii]? with
+        | none => throw "P_DamageMobj: bad inflictor"
+        | some inf =>
+          let mut ang := pointToAngle2 inf.x inf.y tgt.x tgt.y
+          let info ←
+            match mobjinfo[tgt.typeId.toNatClampNeg]? with
+            | some i => pure i
+            | none => throw "P_DamageMobj: missing mobjinfo"
+          let mut thrust := damage * (FRACUNIT >>> 3) * 100 / info.mass
+          if damage < 40 && damage > tgt.health && tgt.z - inf.z > 64 * FRACUNIT then
+            let (r, rng) := pRandom gs.rng
+            gs := { gs with rng }
+            if (r &&& 1) != 0 then
+              ang := ang + ANG180
+              thrust := thrust * 4
+          let fine := (ang >>> ANGLETOFINESHIFT.toUInt32) &&& FINEMASK
+          match finecosine[fine.toNat]?, finesine[fine.toNat]? with
+          | some cosv, some sinv =>
+            match gs.mobjs[targetIdx]? with
+            | none => throw "P_DamageMobj: lost before thrust"
+            | some t2 =>
+              gs := setMo gs targetIdx {
+                t2 with
+                momx := t2.momx + fixedMul thrust cosv
+                momy := t2.momy + fixedMul thrust sinv
+              }
+          | _, _ => throw "P_DamageMobj: fine table OOB"
+      | _, _ => throw "P_DamageMobj: thrust missing mobj"
+    match gs.mobjs[targetIdx]? with
+    | none => throw "P_DamageMobj: lost before player"
+    | some tP =>
+      if tP.player >= 0 then
+        match gs.level.subsectors[tP.subsector.toNat]? with
+        | none => throw "P_DamageMobj: player subsector missing"
+        | some ss =>
+          match gs.sectors[ss.sector.toNat]? with
+          | none => throw "P_DamageMobj: player sector missing"
+          | some sec =>
+            if sec.special == 11 && damage >= tP.health then
+              damage := tP.health - 1
+        match gs.players[tP.player.toNatClampNeg]? with
+        | none => throw "P_DamageMobj: bad player"
+        | some pl0 =>
+          if damage < 1000 &&
+              ((pl0.cheats &&& CF_GODMODE) != 0 ||
+                (match pl0.powers[pw_invulnerability]? with
+                 | some v => v != 0
+                 | none => false)) then
+            return gs
+          let mut pl := pl0
+          if pl.armortype != 0 then
+            let mut saved :=
+              if pl.armortype == 1 then damage / 3 else damage / 2
+            if pl.armorpoints <= saved then
+              saved := pl.armorpoints
+              pl := { pl with armortype := 0 }
+            pl := { pl with armorpoints := pl.armorpoints - saved }
+            damage := damage - saved
+          let mut php := pl.health - damage
+          if php < 0 then php := 0
+          let mut dmgc := pl.damagecount + damage
+          if dmgc > 100 then dmgc := 100
+          pl := { pl with health := php, damagecount := dmgc }
+          gs := setPlayer gs tP.player.toNatClampNeg pl
+      match gs.mobjs[targetIdx]? with
+      | none => throw "P_DamageMobj: lost before health"
+      | some t3 =>
+        let health := t3.health - damage
+        gs := setMo gs targetIdx { t3 with health }
+        if health <= 0 then
+          return (← killMobjWith setSt gs sourceIdx targetIdx)
+        let info ←
+          match mobjinfo[t3.typeId.toNatClampNeg]? with
+          | some i => pure i
+          | none => throw "P_DamageMobj: missing mobjinfo"
+        match gs.mobjs[targetIdx]? with
+        | none => throw "P_DamageMobj: lost before pain"
+        | some t4 =>
+          let (rPain, rng) := pRandom gs.rng
+          gs := { gs with rng }
+          if rPain < info.painchance && (t4.flags &&& MF_SKULLFLY) == 0 then
+            let t4 := { t4 with flags := t4.flags ||| MF_JUSTHIT }
+            gs := setMo gs targetIdx t4
+            let (gs1, _) ← setSt gs targetIdx info.painstate
+            gs := gs1
+          match gs.mobjs[targetIdx]? with
+          | none => throw "P_DamageMobj: lost before retarget"
+          | some t5 =>
+            let t5 := { t5 with reactiontime := 0 }
+            gs := setMo gs targetIdx t5
+            let srcOk :=
+              match sourceIdx with
+              | none => false
+              | some si =>
+                if si == targetIdx then false
+                else
+                  match gs.mobjs[si]? with
+                  | some src => src.typeId != MT_VILE
+                  | none => false
+            if (t5.threshold == 0 || t5.typeId == MT_VILE) && srcOk then
+              match sourceIdx with
+              | none => pure gs
+              | some si =>
+                match gs.mobjs[targetIdx]? with
+                | none => throw "P_DamageMobj: lost on retarget"
+                | some t6 =>
+                  let t6 := { t6 with target := si.toInt32, threshold := BASETHRESHOLD }
+                  gs := setMo gs targetIdx t6
+                  if t6.state == info.spawnstate && info.seestate != 0 then
+                    let (gs1, _) ← setSt gs targetIdx info.seestate
+                    pure gs1
+                  else
+                    pure gs
+            else
+              pure gs
+
+/-- Nested `P_SetMobjState` from `A_SPosAttack` hits: null-action only (player
+pain / death overlays). Non-null actions loud-error instead of re-entering
+the set-state mutual. -/
+private def applyNullActionState (gs : GameState) (idx : Nat) (stnum : UInt32) :
+    Except String (GameState × Bool) := do
+  match states[stnum.toNat]? with
+  | none => throw s!"P_SetMobjState: bad state {stnum}"
+  | some st =>
+    if st.action != actionNull then
+      throw s!"A_SPosAttack: nested action {st.action} not implemented"
+    if st.tics == 0 then
+      throw "A_SPosAttack: tics=0 setState not implemented"
+    match gs.mobjs[idx]? with
+    | none => throw "P_SetMobjState: bad mobj"
+    | some mo =>
+      pure (setMo gs idx {
+        mo with
+        state := stnum
+        tics := st.tics
+        sprite := st.sprite
+        frame := st.frame
+      }, true)
+
+/-- `A_SPosAttack`. -/
+def aSPosAttack (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_SPosAttack: bad mobj"
+  | some actor0 =>
+    if actor0.target < 0 then
+      return gs0
+    let mut gs := {
+      gs0 with
+      rng := startSoundPitchRngMaybe gs0.rng sfx_shotgn (originAudible gs0 mobjIdx)
+    }
+    gs ← aFaceTarget gs mobjIdx
+    match gs.mobjs[mobjIdx]? with
+    | none => throw "A_SPosAttack: lost after face"
+    | some actor =>
+      let bangle := actor.angle
+      let (gs1, slope, _) ← Hitscan.aimLineAttack gs mobjIdx bangle Hitscan.MISSILERANGE
+      gs := gs1
+      let mut i : Nat := 0
+      while i < 3 do
+        let (d, rng) := pSubRandom gs.rng
+        gs := { gs with rng }
+        let angle := bangle + (d.toUInt32 <<< 20)
+        let (r, rng) := pRandom gs.rng
+        gs := { gs with rng }
+        let damage := ((r % 5) + 1) * 3
+        gs ← Hitscan.lineAttack (damageMobjWith applyNullActionState)
+          gs mobjIdx angle Hitscan.MISSILERANGE slope damage
+        i := i + 1
+      pure gs
+
 -- Fuel-bounded set-state / action / look / chase cycle (no partial).
 mutual
 def setMobjStateFuel (gs0 : GameState) (mobjIdx : Nat) (state0 : UInt32) (fuel : Nat) :
@@ -537,7 +849,9 @@ def runMobjActionFuel (gs0 : GameState) (mobjIdx : Nat) (action : ActionId) (fue
     else if action == action_A_Pain then
       aPain gs0 mobjIdx
     else if action == action_A_SPosAttack then
-      throw "A_SPosAttack: not implemented"
+      aSPosAttack gs0 mobjIdx
+    else if action == action_A_Scream then
+      throw "A_Scream: not implemented"
     else
       throw s!"P_MobjThinker/SetMobjState: unimplemented action {action}"
 
@@ -739,5 +1053,13 @@ def aLook (gs0 : GameState) (mobjIdx : Nat) : Except String GameState :=
 
 def aChase (gs0 : GameState) (mobjIdx : Nat) : Except String GameState :=
   aChaseFuel gs0 mobjIdx 1000000
+
+def damageMobj (gs0 : GameState) (targetIdx : Nat) (inflictorIdx sourceIdx : Option Nat)
+    (damage0 : Int32) : Except String GameState :=
+  damageMobjWith setMobjState gs0 targetIdx inflictorIdx sourceIdx damage0
+
+def killMobj (gs0 : GameState) (sourceIdx : Option Nat) (targetIdx : Nat) :
+    Except String GameState :=
+  killMobjWith setMobjState gs0 sourceIdx targetIdx
 
 end Doom.Playsim.Enemy

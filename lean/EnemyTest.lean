@@ -5,20 +5,22 @@ import Doom.Playsim.Enemy
 import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
+import Doom.Playsim.Info
 import Doom.Playsim.Inter
 import Doom.Playsim.Level
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sound
+import Doom.Playsim.Spawn
 import Doom.Playsim.Spec
 import Doom.Playsim.Tables
 import Doom.Playsim.Thinker
 import Doom.Wad
 
 /-!
-P2c-vii implementation tests: S_NULL remove, P_GiveArmor already-done, plus
-retained P2c-vi / P2c-v / P2c-iii helpers.
+P2c-viii implementation tests: A_SPosAttack pellets, armor class 1 save,
+P_KillMobj shotgun drop, plus retained P2c-vii / P2c-vi / P2c-v / P2c-iii helpers.
 -/
 
 open Doom.Playsim.Angle
@@ -28,12 +30,14 @@ open Doom.Playsim.Enemy
 open Doom.Playsim.Fixed
 open Doom.Playsim.Flags
 open Doom.Playsim.GameState
+open Doom.Playsim.Info
 open Doom.Playsim.Inter
 open Doom.Playsim.Level
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sound
+open Doom.Playsim.Spawn
 open Doom.Playsim.Spec
 open Doom.Playsim.Tables
 open Doom.Playsim.Thinker
@@ -438,8 +442,216 @@ def main (_args : List String) : IO UInt32 := do
     | some p =>
       ok := (← assert "A_ReFire else refire=0" (p.refire == 0)) && ok
 
+  -- P2c-viii: armor class 1 save (dmg/3) -----------------------------------
+  let armorLevel : LevelData := {
+    vertexes := #[]
+    sectors := #[{
+      floorheight := 0, ceilingheight := 10 * FRACUNIT
+      floorpic := ByteArray.empty, ceilingpic := ByteArray.empty
+      lightlevel := 0, special := 0, tag := 0
+      lines := #[], blockbox := #[0, 0, 0, 0]
+      soundorgX := 0, soundorgY := 0
+    }]
+    sides := #[]
+    lines := #[]
+    segs := #[]
+    subsectors := #[{ numsegs := 0, firstseg := 0, sector := 0 }]
+    nodes := #[]
+    things := #[]
+    blockmap := { originX := 0, originY := 0, width := 0, height := 0, lump := #[] }
+    reject := ByteArray.empty
+  }
+  let gsA0 := Doom.Playsim.GameState.initFromLevel armorLevel 2 #[true, false, false, false] 0
+  let plMo := {
+    Doom.Playsim.Mobj.empty with
+    typeId := 0, player := 0, health := 100
+    flags := MF_SOLID ||| MF_SHOOTABLE
+    height := 56 * FRACUNIT, radius := 16 * FRACUNIT
+    subsector := 0
+  }
+  let plA := {
+    Doom.Playsim.Player.empty with
+    mo := 0, readyweapon := wp_pistol, playerstate := PST_LIVE
+    health := 100, armorpoints := 100, armortype := 1
+    pendingweapon := wp_nochange
+  }
+  let gsArmor := {
+    gsA0 with
+    mobjs := #[plMo]
+    players := Doom.Playsim.GameState.arrSet gsA0.players 0 plA
+  }
+  match damageMobj gsArmor 0 none none 3 with
+  | Except.error e =>
+    ok := (← assert s!"armor class 1 ({e})" false) && ok
+  | Except.ok gsA1 =>
+    match gsA1.players[0]?, gsA1.mobjs[0]? with
+    | some p, some mo =>
+      ok := (← assert "armor class 1 player hp 100→98" (p.health == 98)) && ok
+      ok := (← assert "armor class 1 armor 100→99" (p.armorpoints == 99)) && ok
+      ok := (← assert "armor class 1 keeps type 1" (p.armortype == 1)) && ok
+      ok := (← assert "armor class 1 mobj hp 98" (mo.health == 98)) && ok
+      ok := (← assert "armor class 1 JUSTHIT" ((mo.flags &&& MF_JUSTHIT) != 0)) && ok
+      ok := (← assert "armor class 1 S_PLAY_PAIN" (mo.state == 156)) && ok
+    | _, _ =>
+      ok := (← assert "armor class 1 player/mobj" false) && ok
+
+  -- P2c-viii: player-target kill loud-error --------------------------------
+  let gsKillP := {
+    gsArmor with
+    mobjs := #[{ plMo with health := 1 }]
+    players := Doom.Playsim.GameState.arrSet gsA0.players 0 { plA with health := 1 }
+  }
+  match damageMobj gsKillP 0 none none 10 with
+  | Except.error e =>
+    ok := (← assert "player-target kill loud-error"
+      (e.contains "player target not implemented")) && ok
+  | Except.ok _ =>
+    ok := (← assert "player-target kill should loud-error" false) && ok
+
+  -- P2c-viii: A_SPosAttack no target is a no-op ----------------------------
+  let gsNoT := { gsA0 with mobjs := #[{ Doom.Playsim.Mobj.empty with target := -1 }] }
+  match aSPosAttack gsNoT 0 with
+  | Except.error e =>
+    ok := (← assert s!"A_SPosAttack no target ({e})" false) && ok
+  | Except.ok gsNoT1 =>
+    ok := (← assert "A_SPosAttack no target no RNG"
+      (gsNoT1.rng.prndindex == 0 && gsNoT1.rng.rndindex == 0)) && ok
+
+  -- P2c-viii: A_SPosAttack 3 pellets + P_KillMobj shotgun drop on E1M1 ------
+  match checkNumForName wad "E1M1" with
+  | none => ok := (← assert "E1M1 present for kill drop" false) && ok
+  | some idx =>
+    match (do
+      let things ← mapLumpData wad idx ML_THINGS
+      let linedefs ← mapLumpData wad idx ML_LINEDEFS
+      let sidedefs ← mapLumpData wad idx ML_SIDEDEFS
+      let vertexes ← mapLumpData wad idx ML_VERTEXES
+      let segs ← mapLumpData wad idx ML_SEGS
+      let ssectors ← mapLumpData wad idx ML_SSECTORS
+      let nodes ← mapLumpData wad idx ML_NODES
+      let sectors ← mapLumpData wad idx ML_SECTORS
+      let reject ← mapLumpData wad idx ML_REJECT
+      let blockmap ← mapLumpData wad idx ML_BLOCKMAP
+      buildLevel things linedefs sidedefs vertexes segs ssectors nodes sectors reject blockmap) with
+    | Except.error e =>
+      ok := (← assert s!"E1M1 load kill ({e})" false) && ok
+    | Except.ok levelK =>
+      let gsK0 := Doom.Playsim.GameState.initFromLevel levelK 3 #[true, false, false, false] 0
+      -- Player start-ish E1M1 coords (map units << 16).
+      let px := (-16 : Int32) <<< 16
+      let py := (-496 : Int32) <<< 16
+      match spawnMobj gsK0 px py ONFLOORZ 0 with
+      | Except.error e =>
+        ok := (← assert s!"spawn player mobj ({e})" false) && ok
+      | Except.ok (gsK1, pIdx) =>
+        match spawnMobj gsK1 (px + 64 * FRACUNIT) py ONFLOORZ MT_SHOTGUY with
+        | Except.error e =>
+          ok := (← assert s!"spawn shotguy ({e})" false) && ok
+        | Except.ok (gsK2, sIdx) =>
+          match gsK2.mobjs[sIdx]? with
+          | none => ok := (← assert "shotguy present" false) && ok
+          | some sg0 =>
+            let gsK3 := {
+              gsK2 with
+              mobjs := Doom.Playsim.GameState.arrSet gsK2.mobjs sIdx
+                { sg0 with target := pIdx.toInt32, health := 1 }
+            }
+            -- 3 pellets: each draws P_SubRandom (2) + P_Random (1) before the trace.
+            let prndBefore := gsK3.rng.prndindex
+            match aSPosAttack gsK3 sIdx with
+            | Except.error e =>
+              ok := (← assert s!"A_SPosAttack 3 pellets ({e})" false) && ok
+            | Except.ok gsK4 =>
+              let drew :=
+                (gsK4.rng.prndindex.toNat + 256 - prndBefore.toNat) % 256
+              ok := (← assert "A_SPosAttack 3 pellets drew >= 9 P_Random"
+                (drew >= 9)) && ok
+          -- Isolated kill+drop: damage a 1-hp shotguy from a player source.
+          let gsD0 := gsK2
+          match gsD0.mobjs[sIdx]?, gsD0.mobjs[pIdx]? with
+          | some sg, some pmo =>
+            let gsD1 := {
+              gsD0 with
+              mobjs := Doom.Playsim.GameState.arrSet
+                (Doom.Playsim.GameState.arrSet gsD0.mobjs sIdx { sg with health := 1 })
+                pIdx { pmo with player := 0 }
+              players := Doom.Playsim.GameState.arrSet gsD0.players 0
+                { Doom.Playsim.Player.empty with
+                  mo := pIdx.toInt32, playerstate := PST_LIVE, health := 100
+                  readyweapon := wp_pistol }
+            }
+            match damageMobj gsD1 sIdx (some pIdx) (some pIdx) 15 with
+            | Except.error e =>
+              ok := (← assert s!"P_KillMobj drop ({e})" false) && ok
+            | Except.ok gsD2 =>
+              match gsD2.mobjs[sIdx]? with
+              | none => ok := (← assert "killed shotguy present" false) && ok
+              | some dead =>
+                ok := (← assert "P_KillMobj deathstate 222" (dead.state == 222)) && ok
+                ok := (← assert "P_KillMobj corpse flags"
+                  ((dead.flags &&& MF_CORPSE) != 0
+                    && (dead.flags &&& MF_SHOOTABLE) == 0)) && ok
+                ok := (← assert "P_KillMobj height >> 2"
+                  (dead.height == sg.height >>> 2)) && ok
+              let mut foundDrop := false
+              let mut di : Nat := 0
+              while di < gsD2.mobjs.size do
+                match gsD2.mobjs[di]? with
+                | some mo =>
+                  if mo.typeId == MT_SHOTGUN then
+                    foundDrop := true
+                    ok := (← assert "P_KillMobj drop MF_DROPPED"
+                      ((mo.flags &&& MF_DROPPED) != 0)) && ok
+                    ok := (← assert "P_KillMobj drop ONFLOORZ"
+                      (mo.z ==
+                        (match gsD2.mobjs[sIdx]? with
+                         | some d => d.floorz
+                         | none => (0 : Int32)))) && ok
+                | none => pure ()
+                di := di + 1
+              ok := (← assert "P_KillMobj spawned MT_SHOTGUN" foundDrop) && ok
+          | _, _ =>
+            ok := (← assert "kill-drop mobjs" false) && ok
+          -- Default drop switch: MT_TROOP (11) must not spawn a pickup.
+          match spawnMobj gsK0 px py ONFLOORZ (11 : Int32) with
+          | Except.error e =>
+            ok := (← assert s!"spawn troop for no-drop ({e})" false) && ok
+          | Except.ok (gsT0, tIdx) =>
+            match gsT0.mobjs[tIdx]? with
+            | none => ok := (← assert "troop present" false) && ok
+            | some tr =>
+              let n0 := gsT0.mobjs.size
+              let gsT1 := {
+                gsT0 with
+                mobjs := Doom.Playsim.GameState.arrSet gsT0.mobjs tIdx { tr with health := 1 }
+              }
+              match killMobj gsT1 none tIdx with
+              | Except.error e =>
+                ok := (← assert s!"P_KillMobj no-drop ({e})" false) && ok
+              | Except.ok gsT2 =>
+                ok := (← assert "P_KillMobj default drop spawns nothing"
+                  (gsT2.mobjs.size == n0)) && ok
+
+  -- Import-cycle lock (Hitscan ↛ Enemy/Combat; Enemy ↛ Combat) -------------
+  let hitscanSrc ← IO.FS.readFile (root / "lean" / "Doom" / "Playsim" / "Hitscan.lean")
+  let enemySrc ← IO.FS.readFile (root / "lean" / "Doom" / "Playsim" / "Enemy.lean")
+  ok := (← assert "Hitscan does not import Enemy"
+    (!hitscanSrc.contains "import Doom.Playsim.Enemy")) && ok
+  ok := (← assert "Hitscan does not import Combat"
+    (!hitscanSrc.contains "import Doom.Playsim.Combat")) && ok
+  ok := (← assert "Enemy does not import Combat"
+    (!enemySrc.contains "import Doom.Playsim.Combat")) && ok
+
+  -- Named A_Scream loud-error -----------------------------------------------
+  match runMobjAction gsA0 0 action_A_Scream with
+  | Except.error e =>
+    ok := (← assert "A_Scream named loud-error"
+      (e == "A_Scream: not implemented")) && ok
+  | Except.ok _ =>
+    ok := (← assert "A_Scream should loud-error" false) && ok
+
   if ok then
-    IO.println "ALL P2c-vii ENEMY UNIT CHECKS PASSED"
+    IO.println "ALL P2c-viii ENEMY UNIT CHECKS PASSED"
     pure 0
   else
     IO.eprintln "SOME P2c-vi ENEMY UNIT CHECKS FAILED"

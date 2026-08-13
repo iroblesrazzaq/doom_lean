@@ -16,6 +16,7 @@ open Doom.Playsim.Random
 
 /-- `sfxenum_t` values needed for pitch-branch rules (`sounds.h`, `sfx_None = 0`). -/
 def sfx_pistol : Nat := 1
+def sfx_shotgn : Nat := 2
 def sfx_sawup : Nat := 10
 def sfx_sawhit : Nat := 13
 def sfx_itemup : Nat := 32
