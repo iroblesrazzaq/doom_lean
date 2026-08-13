@@ -3,6 +3,7 @@ import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
 import Doom.Playsim.Info
+import Doom.Playsim.Inter
 import Doom.Playsim.Level
 import Doom.Playsim.Map
 import Doom.Playsim.MapUtil
@@ -17,9 +18,9 @@ import Doom.Playsim.Tables
 /-!
 # Doom.Playsim.Enemy
 
-`p_enemy.c` open subset for DEMO1 wake + chase (P2c-iii): look/chase helpers,
-`A_Look` seeyou, `A_Chase`, plus `P_SetMobjState` / action dispatch (avoids a
-Think↔Enemy import cycle).
+`p_enemy.c` open subset for DEMO1 wake + chase (P2c-iii) through S_NULL remove
+(P2c-vii): look/chase helpers, `A_Look` / `A_Chase`, plus `P_SetMobjState`
+(S_NULL → `Inter.removeMobj`) / action dispatch (avoids a Think↔Enemy cycle).
 -/
 
 namespace Doom.Playsim.Enemy
@@ -29,6 +30,7 @@ open Doom.Playsim.Fixed
 open Doom.Playsim.Flags
 open Doom.Playsim.GameState
 open Doom.Playsim.Info
+open Doom.Playsim.Inter
 open Doom.Playsim.Level
 open Doom.Playsim.Map
 open Doom.Playsim.MapUtil
@@ -489,7 +491,13 @@ def setMobjStateFuel (gs0 : GameState) (mobjIdx : Nat) (state0 : UInt32) (fuel :
   | 0 => throw "P_SetMobjState: fuel exhausted"
   | fuel' + 1 => do
     if state0 == 0 then
-      throw "P_SetMobjState: S_NULL remove not implemented"
+      let mo ←
+        match gs0.mobjs[mobjIdx]? with
+        | none => throw "P_SetMobjState: bad mobj"
+        | some mo => pure mo
+      let gs := setMo gs0 mobjIdx { mo with state := 0 }
+      let gs ← removeMobj gs mobjIdx
+      return (gs, false)
     match states[state0.toNat]? with
     | none => throw s!"P_SetMobjState: bad state {state0}"
     | some st =>
@@ -528,6 +536,8 @@ def runMobjActionFuel (gs0 : GameState) (mobjIdx : Nat) (action : ActionId) (fue
       aFaceTarget gs0 mobjIdx
     else if action == action_A_Pain then
       aPain gs0 mobjIdx
+    else if action == action_A_SPosAttack then
+      throw "A_SPosAttack: not implemented"
     else
       throw s!"P_MobjThinker/SetMobjState: unimplemented action {action}"
 

@@ -5,17 +5,20 @@ import Doom.Playsim.Enemy
 import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
+import Doom.Playsim.Inter
 import Doom.Playsim.Level
+import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Random
 import Doom.Playsim.Sound
 import Doom.Playsim.Spec
 import Doom.Playsim.Tables
+import Doom.Playsim.Thinker
 import Doom.Wad
 
 /-!
-P2c-vi implementation tests: FindLowestCeilingSurrounding, T_MovePlane ceiling
-UP, plus retained P2c-v / P2c-iii helpers.
+P2c-vii implementation tests: S_NULL remove, P_GiveArmor already-done, plus
+retained P2c-vi / P2c-v / P2c-iii helpers.
 -/
 
 open Doom.Playsim.Angle
@@ -25,12 +28,15 @@ open Doom.Playsim.Enemy
 open Doom.Playsim.Fixed
 open Doom.Playsim.Flags
 open Doom.Playsim.GameState
+open Doom.Playsim.Inter
 open Doom.Playsim.Level
+open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Random
 open Doom.Playsim.Sound
 open Doom.Playsim.Spec
 open Doom.Playsim.Tables
+open Doom.Playsim.Thinker
 open Doom.Wad
 
 def assert (name : String) (cond : Bool) : IO Bool := do
@@ -364,8 +370,76 @@ def main (_args : List String) : IO UInt32 := do
         (lowest - 4 * FRACUNIT == (4456448 : Int32))) && ok
       ok := (← assert "VDOORSPEED=2*FRACUNIT" (VDOORSPEED == 2 * FRACUNIT)) && ok
 
+  -- P_GiveArmor already-done vs grant --------------------------------------
+  let pHave := { Doom.Playsim.Player.empty with armorpoints := 100, armortype := 1 }
+  let (pKeep, gaveHave) := giveArmor pHave 1
+  ok := (← assert "giveArmor already-done false" (!gaveHave)) && ok
+  ok := (← assert "giveArmor already-done keeps points"
+    (pKeep.armorpoints == 100 && pKeep.armortype == 1)) && ok
+  let pNone := { Doom.Playsim.Player.empty with armorpoints := 0, armortype := 0 }
+  let (pGot, gaveNone) := giveArmor pNone 1
+  ok := (← assert "giveArmor grant true" gaveNone) && ok
+  ok := (← assert "giveArmor grant 100/class 1"
+    (pGot.armorpoints == 100 && pGot.armortype == 1)) && ok
+
+  -- P_SetMobjState S_NULL: remove, return false, keep thinker slot ----------
+  let emptyNull : LevelData := {
+    vertexes := #[]
+    sectors := #[]
+    sides := #[]
+    lines := #[]
+    segs := #[]
+    subsectors := #[]
+    nodes := #[]
+    things := #[]
+    blockmap := { originX := 0, originY := 0, width := 0, height := 0, lump := #[] }
+    reject := ByteArray.empty
+  }
+  let gsN0 := Doom.Playsim.GameState.initFromLevel emptyNull 2 #[true, false, false, false] 0
+  let blood := {
+    Doom.Playsim.Mobj.empty with
+    traceId := 231, state := 92, tics := 1
+    flags := MF_NOSECTOR ||| MF_NOBLOCKMAP
+  }
+  let thBlood : Thinker := { traceId := 231, func := THF_MOBJ, payload := 0 }
+  let gsN := { gsN0 with mobjs := #[blood], thinkers := #[thBlood] }
+  match setMobjState gsN 0 0 with
+  | Except.error e =>
+    ok := (← assert s!"S_NULL remove ({e})" false) && ok
+  | Except.ok (gsN1, still) =>
+    ok := (← assert "S_NULL returns false" (!still)) && ok
+    ok := (← assert "S_NULL keeps thinker slot" (gsN1.thinkers.size == 1)) && ok
+    match gsN1.thinkers[0]? with
+    | none => ok := (← assert "S_NULL thinker present" false) && ok
+    | some th =>
+      ok := (← assert "S_NULL marks THF_REMOVED" (th.func == THF_REMOVED)) && ok
+      ok := (← assert "S_NULL keeps traceId" (th.traceId == 231)) && ok
+    match gsN1.mobjs[0]? with
+    | none => ok := (← assert "S_NULL mobj remains" false) && ok
+    | some mo =>
+      ok := (← assert "S_NULL mobj.state=0" (mo.state == 0)) && ok
+
+  -- A_ReFire else: clear refire + checkAmmo (no BT_ATTACK) -----------------
+  let plRf := {
+    Doom.Playsim.Player.empty with
+    health := 100, pendingweapon := wp_nochange, readyweapon := wp_pistol
+    ammo := #[50, 0, 0, 0], refire := 3, cmd := TicCmd.zero
+  }
+  let gsRf := {
+    gsN0 with
+    players := Doom.Playsim.GameState.arrSet gsN0.players 0 plRf
+  }
+  match reFire gsRf 0 with
+  | Except.error e =>
+    ok := (← assert s!"A_ReFire else ({e})" false) && ok
+  | Except.ok gsRf1 =>
+    match gsRf1.players[0]? with
+    | none => ok := (← assert "A_ReFire else player" false) && ok
+    | some p =>
+      ok := (← assert "A_ReFire else refire=0" (p.refire == 0)) && ok
+
   if ok then
-    IO.println "ALL P2c-vi ENEMY UNIT CHECKS PASSED"
+    IO.println "ALL P2c-vii ENEMY UNIT CHECKS PASSED"
     pure 0
   else
     IO.eprintln "SOME P2c-vi ENEMY UNIT CHECKS FAILED"

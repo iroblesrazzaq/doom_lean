@@ -251,7 +251,9 @@ def mobjThinker (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := d
               match states[mo3.state.toNat]? with
               | none => throw "P_MobjThinker: bad state"
               | some st =>
-                let (gs2, _) ← setMobjState gs mobjIdx st.nextstate
+                let (gs2, stillPresent) ← setMobjState gs mobjIdx st.nextstate
+                if !stillPresent then
+                  return gs2
                 pure gs2
           else
             pure gs

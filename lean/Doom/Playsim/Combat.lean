@@ -619,6 +619,24 @@ def firePistol (gs0 : GameState) (playerIdx : Nat) : Except String GameState := 
         | some p4 =>
           gunShot gs p4.mo.toNatClampNeg (p4.refire == 0) slope
 
+/-- `A_ReFire`. -/
+def reFire (gs0 : GameState) (playerIdx : Nat) : Except String GameState := do
+  match gs0.players[playerIdx]? with
+  | none => throw "A_ReFire: bad player"
+  | some player =>
+    if (player.cmd.buttons &&& BT_ATTACK) != 0 &&
+        player.pendingweapon == wp_nochange &&
+        player.health != 0 then
+      let gs := setPlayer gs0 playerIdx { player with refire := player.refire + 1 }
+      fireWeapon gs playerIdx
+    else
+      let gs := setPlayer gs0 playerIdx { player with refire := 0 }
+      match gs.players[playerIdx]? with
+      | none => throw "A_ReFire: player lost"
+      | some p =>
+        checkAmmo p
+        pure gs
+
 /-- GameState-threaded `P_SetPsprite` (weapon fire + raise). -/
 def setPsprite (gs0 : GameState) (playerIdx : Nat) (position : Nat) (stnum0 : UInt32) :
     Except String GameState := do
@@ -676,7 +694,7 @@ def setPsprite (gs0 : GameState) (playerIdx : Nat) (position : Nat) (stnum0 : UI
           | some pL =>
             gs := setPlayer gs playerIdx { pL with extralight := 0 }
         else if st.action == action_A_ReFire then
-          throw "A_ReFire: not implemented"
+          gs ← reFire gs playerIdx
         else if st.action == action_A_GunFlash then
           throw "A_GunFlash: not implemented"
         else if st.action != actionNull then
