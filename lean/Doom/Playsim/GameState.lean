@@ -46,7 +46,8 @@ structure SectorRuntime where
   validcount : Int32
   /-- Line indices (copied from geometry). -/
   lines : Array UInt32
-  deriving Repr
+  /-- Mutable floor flat (copied from geometry; `EV_DoPlat` may replace). -/
+  floorpic : ByteArray
 
 structure LightFlash where
   sector : UInt32
@@ -84,6 +85,84 @@ structure VerticalDoor where
   topcountdown : Int32
   deriving Repr
 
+/-- `p_spec.h` `MAXPLATS`. -/
+def MAXPLATS : Nat := 30
+
+/-- `floormove_t` payload (`p_spec.h`). `specialdata` stores this array index. -/
+structure FloorMove where
+  sector : UInt32
+  type_ : Int32
+  crush : Bool
+  direction : Int32
+  speed : Int32
+  floordestheight : Int32
+  deriving Repr
+
+/-- `plat_t` payload (`p_spec.h`). `specialdata` / `activePlats` store this array index. -/
+structure Plat where
+  sector : UInt32
+  speed : Int32
+  low : Int32
+  high : Int32
+  wait : Int32
+  count : Int32
+  status : Int32
+  oldstatus : Int32
+  crush : Bool
+  tag : Int32
+  type_ : Int32
+  deriving Repr
+
+/-- Untraced `ST_Ticker` face widget state (`st_stuff.c` statics). Not in TraceFormat. -/
+structure StFaceState where
+  faceindex : Int32
+  facecount : Int32
+  oldhealth : Int32
+  oldweaponsowned : Array Int32
+  lastattackdown : Int32
+  priority : Int32
+  /-- `ST_calcPainOffset` `lastcalc`. -/
+  painOffset : Int32
+  /-- `ST_calcPainOffset` static `oldhealth`. -/
+  painOldhealth : Int32
+  /-- `weaponowned` snapshot at `ST_initData`; arms icons use it for backing-copy. -/
+  spawnWeaponsOwned : Array Int32
+
+/-- Untraced `anim_t` (`p_spec.c`). Not in TraceFormat. -/
+structure PicAnim where
+  istexture : Bool
+  picnum : Int32
+  basepic : Int32
+  numpics : Int32
+  speed : Int32
+  deriving Repr
+
+/-- `ST_initData` / `ST_Start` defaults before copying live `weaponowned`. -/
+def StFaceState.init : StFaceState := {
+  faceindex := 0
+  facecount := 0
+  oldhealth := -1
+  oldweaponsowned := Array.replicate NUMWEAPONS 0
+  lastattackdown := -1
+  priority := 0
+  painOffset := 0
+  painOldhealth := -1
+  spawnWeaponsOwned := Array.replicate NUMWEAPONS 0
+}
+
+/-- Untraced `HU_Ticker` message widget (`hu_stuff.c` statics). Not in TraceFormat. -/
+structure HuState where
+  messageOn : Bool
+  messageCounter : Int32
+  messageText : String
+
+/-- `HU_Start` message widget defaults (no title/chat). -/
+def HuState.init : HuState := {
+  messageOn := false
+  messageCounter := 0
+  messageText := ""
+}
+
 structure GameState where
   level : LevelData
   sectors : Array SectorRuntime
@@ -95,6 +174,10 @@ structure GameState where
   strobes : Array StrobeFlash
   glows : Array Glow
   verticalDoors : Array VerticalDoor
+  floors : Array FloorMove
+  plats : Array Plat
+  /-- `activeplats[MAXPLATS]`; empty slot = `-1`, else `plats` payload index. -/
+  activePlats : Array Int32
   rng : RandomState
   /-- Next trace id to assign (`P_AddThinker`); reset to 1 at level load. -/
   traceIdCounter : UInt32
@@ -121,6 +204,14 @@ structure GameState where
   lineValidcount : Array Int32
   /-- Blockmap thing chains (`blocklinks`); `-1` = empty. Size `width*height`. -/
   blocklinks : Array Int32
+  /-- Status-bar face widget statics (`ST_Ticker`); untraced. -/
+  stFace : StFaceState
+  /-- Heads-up message widget statics (`HU_Ticker`); untraced. -/
+  hu : HuState
+  /-- Untraced `anims[0 .. lastanim)` from `P_InitPicAnims`. -/
+  picAnims : Array PicAnim := #[]
+  /-- Untraced `flattranslation`; empty means identity at draw. -/
+  flattranslation : Array Int32 := #[]
 
 def mkSectorRuntime (s : Sector) : SectorRuntime := {
   lightlevel := s.lightlevel
@@ -134,6 +225,7 @@ def mkSectorRuntime (s : Sector) : SectorRuntime := {
   soundtraversed := 0
   validcount := 0
   lines := s.lines
+  floorpic := s.floorpic
 }
 
 def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool)
@@ -152,6 +244,9 @@ def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool
     strobes := #[]
     glows := #[]
     verticalDoors := #[]
+    floors := #[]
+    plats := #[]
+    activePlats := Array.replicate MAXPLATS (-1 : Int32)
     rng := clearRandom
     traceIdCounter := 1
     leveltime := 0
@@ -171,7 +266,26 @@ def initFromLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool
     validcount := 0
     lineValidcount := Array.replicate level.lines.size (0 : Int32)
     blocklinks := Array.replicate bmapCells (-1 : Int32)
+    stFace := StFaceState.init
+    hu := HuState.init
+    picAnims := #[]
+    flattranslation := #[]
   }
+
+/-- `ST_initData` after console `P_SpawnPlayer`: copy live `weaponowned`. -/
+def stInitData (gs : GameState) : GameState :=
+  match gs.players[gs.consoleplayer]? with
+  | none => { gs with stFace := StFaceState.init }
+  | some plyr =>
+    { gs with stFace := {
+        StFaceState.init with
+        oldweaponsowned := plyr.weaponowned
+        spawnWeaponsOwned := plyr.weaponowned
+      } }
+
+/-- `HU_Start` message path only (no title/chat/automap). -/
+def huStart (gs : GameState) : GameState :=
+  { gs with hu := HuState.init }
 
 /-- Proof-free array set. -/
 def arrSet {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=

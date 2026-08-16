@@ -40,6 +40,15 @@ def MAPBLOCKSHIFT : Nat := 23
 /-- `p_local.h` `MAXRADIUS` = 32*FRACUNIT. -/
 def MAXRADIUS : Int32 := 2097152
 
+private def byteAt (pic : ByteArray) (i : Nat) : UInt8 :=
+  match pic[i]? with | some b => b | none => 0
+
+/-- `F_SKY1` 8-byte flat name (vanilla `skyflatnum`). -/
+def isSkyPic (pic : ByteArray) : Bool :=
+  pic.size >= 6 && byteAt pic 0 == 70 && byteAt pic 1 == 95 &&
+    byteAt pic 2 == 83 && byteAt pic 3 == 75 && byteAt pic 4 == 89 &&
+    byteAt pic 5 == 49
+
 structure Vertex where
   x : Int32
   y : Int32

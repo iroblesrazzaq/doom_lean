@@ -1,9 +1,12 @@
 import Doom.Harness.DisplaySim
 import Doom.Harness.TraceFormat
+import Doom.Render
+import Doom.Render.Gfx.Flat
 import Doom.Playsim.Demo
 import Doom.Playsim.GameState
 import Doom.Playsim.Level
 import Doom.Playsim.Spawn
+import Doom.Playsim.Spec
 import Doom.Playsim.Tick
 import Doom.Playsim.TraceEmit
 import Doom.Wad
@@ -20,10 +23,13 @@ namespace Doom.Harness.Real
 
 open Doom.Harness.DisplaySim
 open Doom.Harness.TraceFormat
+open Doom.Render
+open Doom.Render.Gfx.Flat
 open Doom.Playsim.Demo
 open Doom.Playsim.GameState
 open Doom.Playsim.Level
 open Doom.Playsim.Spawn
+open Doom.Playsim.Spec
 open Doom.Playsim.Tick
 open Doom.Playsim.TraceEmit
 open Doom.Wad
@@ -59,7 +65,9 @@ Spawn from IWAD + demo lump, run `tics` iterations mirroring `D_DoomLoop`,
 write `pathBase.trc` / `pathBase.dig`.
 -/
 def runReal (iwadPath : System.FilePath) (demoName : String) (tics : Nat)
-    (pathBase : System.FilePath) : IO (Except String Unit) := do
+    (pathBase : System.FilePath)
+    (fbDir : Option System.FilePath := none)
+    (fbTics : Array Nat := #[]) : IO (Except String Unit) := do
   try
     let wad ← loadFile iwadPath
     let demoBytes ←
@@ -80,9 +88,22 @@ def runReal (iwadPath : System.FilePath) (demoName : String) (tics : Nat)
         match setupSpawnedLevel level (hdr.skill.toUInt32.toInt32) hdr.playeringame
             hdr.consoleplayer.toNat with
         | Except.error e => return Except.error e
-        | Except.ok gs0 =>
+        | Except.ok gsSpawn =>
+          let firstFlat ←
+            match initFlats wad with
+            | Except.error e => return Except.error e
+            | Except.ok (first, _) => pure first
+          let resolve (name : String) : Option Nat :=
+            match checkNumForName wad name with
+            | none => none
+            | some idx => some (idx - firstFlat)
+          let picAnims ←
+            match initPicAnims resolve with
+            | Except.error e => return Except.error e
+            | Except.ok anims => pure anims
           let gs0 := {
-            gs0 with
+            gsSpawn with
+            picAnims
             demoBytes
             demoCursor := 13
             demoplayback := true
@@ -92,6 +113,7 @@ def runReal (iwadPath : System.FilePath) (demoName : String) (tics : Nat)
           let mut disp := initDisplay
           let mut records : Array TicRecord := #[]
           let mut err : Option String := none
+          let mut fuzzpos : Nat := 0
           -- Bootstrap: tic 0 via TryRunTics, no display (`D_DoomLoop`).
           if tics > 0 && err.isNone then
             match runOneTic gs 0 with
@@ -111,6 +133,9 @@ def runReal (iwadPath : System.FilePath) (demoName : String) (tics : Nat)
               let (disp', rng') := onFrame disp gs.rng gsLevel
               disp := disp'
               gs := { gs with rng := rng' }
+              match ← dumpIfRequested wad gs fbDir fbTics fuzzpos with
+              | Except.error e => err := some e
+              | Except.ok fp => fuzzpos := fp
             g := g + 1
           match err with
           | some e => pure (Except.error e)

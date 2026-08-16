@@ -8,6 +8,7 @@ import Doom.Playsim.Flags
 import Doom.Playsim.Thinker
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
+import Doom.Playsim.Input
 import Doom.Playsim.GameState
 import Doom.Playsim.Bsp
 import Doom.Playsim.Demo
@@ -22,6 +23,7 @@ import Doom.Playsim.Combat
 import Doom.Playsim.Sight
 import Doom.Playsim.Sound
 import Doom.Playsim.Spec
+import Doom.Playsim.SargAttack
 import Doom.Playsim.Enemy
 import Doom.Playsim.Think
 import Doom.Playsim.PlayerThink

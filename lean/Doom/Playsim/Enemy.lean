@@ -10,7 +10,9 @@ import Doom.Playsim.Map
 import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
+import Doom.Playsim.Psprite
 import Doom.Playsim.Random
+import Doom.Playsim.SargAttack
 import Doom.Playsim.Sight
 import Doom.Playsim.Sound
 import Doom.Playsim.Spawn
@@ -21,10 +23,11 @@ import Doom.Playsim.Tables
 # Doom.Playsim.Enemy
 
 `p_enemy.c` / `p_inter.c` open subset for DEMO1 wake + chase through first
-kill death frames (P2c-ix): look/chase helpers, `A_SPosAttack`, `A_Scream` /
-`A_Fall`, `P_DamageMobj` / `P_KillMobj`, plus `P_SetMobjState` (S_NULL →
-`Inter.removeMobj`) / action dispatch (avoids a Think↔Enemy cycle). Hitscan
-must not import this module.
+demon melee (P2c-xix): look/chase helpers, `A_PosAttack` / `A_SPosAttack`, `A_Scream` / `A_XScream` /
+`A_Fall`, `A_Explode` → `P_RadiusAttack`, `A_TroopAttack` / `P_ExplodeMissile`,
+`A_SargAttack`, `P_DamageMobj` / `P_KillMobj`, plus `P_SetMobjState`
+(S_NULL → `Inter.removeMobj`) / action dispatch (avoids a Think↔Enemy cycle).
+Hitscan must not import this module.
 -/
 
 namespace Doom.Playsim.Enemy
@@ -40,6 +43,7 @@ open Doom.Playsim.Map
 open Doom.Playsim.MapUtil
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
+open Doom.Playsim.Psprite
 open Doom.Playsim.Random
 open Doom.Playsim.Sight
 open Doom.Playsim.Sound
@@ -81,8 +85,6 @@ def MT_SHOTGUN : Int32 := 77
 def BASETHRESHOLD : Int32 := 100
 /-- `CF_GODMODE` (`doomdef.h`). -/
 def CF_GODMODE : Int32 := 2
-/-- `pw_invulnerability` (`powertype_t`). -/
-def pw_invulnerability : Nat := 0
 
 /-- `P_SetMobjState` callback so damage/kill can live outside the mutual block. -/
 abbrev SetMobjStateFn :=
@@ -139,6 +141,7 @@ def pMove (gs0 : GameState) (mobjIdx : Nat) : Except String (GameState × Bool) 
     let tryx := actor0.x + info.speed * xs
     let tryy := actor0.y + info.speed * ys
     let (gs1, scr, ok) ← tryMove gs0 mobjIdx tryx tryy
+      (crossSpecial := some Spec.crossSpecialLine)
     if ok then
       match gs1.mobjs[mobjIdx]? with
       | none => throw "P_Move: lost after tryMove"
@@ -428,22 +431,6 @@ def aFaceTarget (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := d
       else
         pure gs
 
-/--
-`S_StartSound` origin vs consoleplayer: player/null origins skip
-`S_AdjustSoundParams`; distant origins may return before pitch `M_Random`.
--/
-def originAudible (gs : GameState) (originIdx : Nat) : Bool :=
-  match gs.players[gs.consoleplayer]? with
-  | none => true
-  | some pl =>
-    if pl.mo == originIdx.toInt32 then
-      true
-    else
-      match gs.mobjs[pl.mo.toNatClampNeg]?, gs.mobjs[originIdx]? with
-      | some listener, some origin =>
-        soundAudible listener.x listener.y origin.x origin.y
-      | _, _ => true
-
 /-- `A_Pain`. -/
 def aPain (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
   match gs0.mobjs[mobjIdx]? with
@@ -486,6 +473,31 @@ def aScream (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
       gs with
       rng := startSoundPitchRngMaybe gs.rng sound.toNatClampNeg
         (fullVol || originAudible gs mobjIdx)
+    }
+
+/-- `A_XScream` — `S_StartSound(actor, sfx_slop)` only. Never NULL origin. -/
+def aXScream (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_XScream: bad mobj"
+  | some _actor =>
+    pure {
+      gs0 with
+      rng := startSoundPitchRngMaybe gs0.rng sfx_slop (originAudible gs0 mobjIdx)
+    }
+
+/-- `A_PlayerScream` — `S_StartSound(actor, sfx_pldeth|sfx_pdiehi)` only. -/
+def aPlayerScream (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_PlayerScream: bad mobj"
+  | some actor =>
+    let sound :=
+      if gs0.commercial && actor.health < -50 then
+        sfx_pdiehi
+      else
+        sfx_pldeth
+    pure {
+      gs0 with
+      rng := startSoundPitchRngMaybe gs0.rng sound (originAudible gs0 mobjIdx)
     }
 
 /-- `A_Fall` — clear `MF_SOLID` only. -/
@@ -546,7 +558,7 @@ def noiseAlert (gs0 : GameState) (targetIdx emitterIdx : Nat) : Except String Ga
       let gs := { gs0 with validcount := gs0.validcount + 1 }
       recursiveSoundFuel gs ss.sector.toNat 0 targetIdx.toInt32 1000000
 
-/-- `P_KillMobj` (player-target is a loud-error). -/
+/-- `P_KillMobj` (player-target: clear solid, `PST_DEAD`, `P_DropWeapon`). -/
 def killMobjWith (setSt : SetMobjStateFn) (gs0 : GameState) (sourceIdx : Option Nat)
     (targetIdx : Nat) : Except String GameState := do
   match gs0.mobjs[targetIdx]? with
@@ -559,7 +571,17 @@ def killMobjWith (setSt : SetMobjStateFn) (gs0 : GameState) (sourceIdx : Option 
     let target := { target0 with flags, height := target0.height >>> 2 }
     let mut gs := setMo gs0 targetIdx target
     if target.player >= 0 then
-      throw "P_KillMobj: player target not implemented"
+      let pi := target.player.toNatClampNeg
+      match gs.mobjs[targetIdx]? with
+      | none => throw "P_KillMobj: lost player mobj"
+      | some tMo =>
+        gs := setMo gs targetIdx { tMo with flags := tMo.flags &&& (~~~MF_SOLID) }
+      match gs.players[pi]? with
+      | none => throw "P_KillMobj: bad target player"
+      | some pl =>
+        let plDead := { pl with playerstate := PST_DEAD }
+        let plDrop ← dropWeapon plDead
+        gs := setPlayer gs pi plDrop
     let countKill := (target.flags &&& MF_COUNTKILL) != 0
     match sourceIdx with
     | some si =>
@@ -726,7 +748,11 @@ def damageMobjWith (setSt : SetMobjStateFn) (gs0 : GameState) (targetIdx : Nat)
           if php < 0 then php := 0
           let mut dmgc := pl.damagecount + damage
           if dmgc > 100 then dmgc := 100
-          pl := { pl with health := php, damagecount := dmgc }
+          let attacker :=
+            match sourceIdx with
+            | none => (-1 : Int32)
+            | some si => si.toInt32
+          pl := { pl with health := php, damagecount := dmgc, attacker }
           gs := setPlayer gs tP.player.toNatClampNeg pl
       match gs.mobjs[targetIdx]? with
       | none => throw "P_DamageMobj: lost before health"
@@ -803,6 +829,33 @@ private def applyNullActionState (gs : GameState) (idx : Nat) (stnum : UInt32) :
         frame := st.frame
       }, true)
 
+/-- `A_PosAttack`. C order: face → aim → `sfx_pistol` → spread → one pellet.
+Not the `A_SPosAttack` sound-first / 3-pellet sequence. -/
+def aPosAttack (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_PosAttack: bad mobj"
+  | some actor0 =>
+    if actor0.target < 0 then
+      return gs0
+    let gs ← aFaceTarget gs0 mobjIdx
+    match gs.mobjs[mobjIdx]? with
+    | none => throw "A_PosAttack: lost after face"
+    | some actor =>
+      let angle0 := actor.angle
+      let (gs1, slope, _) ← Hitscan.aimLineAttack gs mobjIdx angle0 Hitscan.MISSILERANGE
+      let mut gs := {
+        gs1 with
+        rng := startSoundPitchRngMaybe gs1.rng sfx_pistol (originAudible gs1 mobjIdx)
+      }
+      let (d, rng) := pSubRandom gs.rng
+      gs := { gs with rng }
+      let angle := angle0 + (d.toUInt32 <<< 20)
+      let (r, rng) := pRandom gs.rng
+      gs := { gs with rng }
+      let damage := ((r % 5) + 1) * 3
+      Hitscan.lineAttack (damageMobjWith applyNullActionState)
+        gs mobjIdx angle Hitscan.MISSILERANGE slope damage
+
 /-- `A_SPosAttack`. -/
 def aSPosAttack (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
   match gs0.mobjs[mobjIdx]? with
@@ -833,6 +886,85 @@ def aSPosAttack (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := d
           gs mobjIdx angle Hitscan.MISSILERANGE slope damage
         i := i + 1
       pure gs
+
+/-- `A_Explode`: source is `actor.target` (none if `< 0`). -/
+def aExplodeWith (damageMobj : Hitscan.DamageMobjFn) (gs0 : GameState) (mobjIdx : Nat) :
+    Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_Explode: bad mobj"
+  | some actor =>
+    let source :=
+      if actor.target < 0 then none else some actor.target.toNatClampNeg
+    Hitscan.radiusAttack damageMobj gs0 mobjIdx source 128
+
+/-- `P_ExplodeMissile`. -/
+def explodeMissileWith (setSt : SetMobjStateFn) (gs0 : GameState) (mobjIdx : Nat) :
+    Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "P_ExplodeMissile: bad mobj"
+  | some mo0 =>
+    let info ← infoOf mo0
+    let gs := setMo gs0 mobjIdx { mo0 with momx := 0, momy := 0, momz := 0 }
+    let (gs1, still) ← setSt gs mobjIdx info.deathstate
+    if !still then
+      return gs1
+    match gs1.mobjs[mobjIdx]? with
+    | none => throw "P_ExplodeMissile: lost after deathstate"
+    | some mo =>
+      let (r, rng) := pRandom gs1.rng
+      let mut tics := mo.tics - (r &&& 3)
+      if tics < 1 then tics := 1
+      let gs2 := {
+        setMo gs1 mobjIdx { mo with tics, flags := mo.flags &&& (~~~MF_MISSILE) } with rng
+      }
+      if info.deathsound == 0 then
+        return gs2
+      pure {
+        gs2 with
+        rng := startSoundPitchRngMaybe gs2.rng info.deathsound.toNatClampNeg
+          (originAudible gs2 mobjIdx)
+      }
+
+/-- `A_TroopAttack`. -/
+def aTroopAttack (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[mobjIdx]? with
+  | none => throw "A_TroopAttack: bad mobj"
+  | some actor0 =>
+    if actor0.target < 0 then
+      return gs0
+    let gs ← aFaceTarget gs0 mobjIdx
+    let (gs, inMelee) ← checkMeleeRange gs mobjIdx
+    if inMelee then
+      let gs := {
+        gs with
+        rng := startSoundPitchRngMaybe gs.rng sfx_claw (originAudible gs mobjIdx)
+      }
+      let (r, rng) := pRandom gs.rng
+      let gs := { gs with rng }
+      let damage := (r % 8 + 1) * 3
+      match gs.mobjs[mobjIdx]? with
+      | none => throw "A_TroopAttack: lost before melee damage"
+      | some actor =>
+        if actor.target < 0 then
+          return gs
+        damageMobjWith applyNullActionState gs actor.target.toNatClampNeg
+          (some mobjIdx) (some mobjIdx) damage
+    else
+      match gs.mobjs[mobjIdx]? with
+      | none => throw "A_TroopAttack: lost before missile"
+      | some actor =>
+        if actor.target < 0 then
+          return gs
+        let (gs, _) ← Spawn.spawnMissile
+          (damageMobjWith applyNullActionState)
+          (explodeMissileWith applyNullActionState)
+          gs mobjIdx actor.target.toNatClampNeg Spawn.MT_TROOPSHOT
+        pure gs
+
+/-- `A_SargAttack`. Closes over face / melee / null-action damage. -/
+def aSargAttack (gs0 : GameState) (mobjIdx : Nat) : Except String GameState :=
+  SargAttack.aSargAttackWith aFaceTarget checkMeleeRange
+    (damageMobjWith applyNullActionState) gs0 mobjIdx
 
 -- Fuel-bounded set-state / action / look / chase cycle (no partial).
 mutual
@@ -887,12 +1019,24 @@ def runMobjActionFuel (gs0 : GameState) (mobjIdx : Nat) (action : ActionId) (fue
       aFaceTarget gs0 mobjIdx
     else if action == action_A_Pain then
       aPain gs0 mobjIdx
+    else if action == action_A_PosAttack then
+      aPosAttack gs0 mobjIdx
     else if action == action_A_SPosAttack then
       aSPosAttack gs0 mobjIdx
     else if action == action_A_Scream then
       aScream gs0 mobjIdx
+    else if action == action_A_XScream then
+      aXScream gs0 mobjIdx
+    else if action == action_A_PlayerScream then
+      aPlayerScream gs0 mobjIdx
     else if action == action_A_Fall then
       aFall gs0 mobjIdx
+    else if action == action_A_Explode then
+      aExplodeWith (damageMobjWith applyNullActionState) gs0 mobjIdx
+    else if action == action_A_TroopAttack then
+      aTroopAttack gs0 mobjIdx
+    else if action == action_A_SargAttack then
+      aSargAttack gs0 mobjIdx
     else
       throw s!"P_MobjThinker/SetMobjState: unimplemented action {action}"
 
@@ -1032,7 +1176,18 @@ def aChaseFuel (gs0 : GameState) (mobjIdx : Nat) (fuel : Nat) : Except String Ga
         let (gs1, inMelee) ← checkMeleeRange gs mobjIdx
         gs := gs1
         if inMelee then
-          throw "A_Chase: meleestate not implemented"
+          match gs.mobjs[mobjIdx]? with
+          | none => throw "A_Chase: lost before meleestate"
+          | some a =>
+            let info ← infoOf a
+            let gsS :=
+              if info.attacksound != 0 then
+                { gs with
+                  rng := startSoundPitchRngMaybe gs.rng info.attacksound.toNatClampNeg
+                    (originAudible gs mobjIdx) }
+              else gs
+            let (gs2, _) ← setMobjStateFuel gsS mobjIdx info.meleestate fuel'
+            return gs2
       if info.missilestate != 0 then
         let skipMissile :=
           gs.gameskill < sk_nightmare && actor.movecount != 0
@@ -1098,6 +1253,12 @@ def aChase (gs0 : GameState) (mobjIdx : Nat) : Except String GameState :=
 def damageMobj (gs0 : GameState) (targetIdx : Nat) (inflictorIdx sourceIdx : Option Nat)
     (damage0 : Int32) : Except String GameState :=
   damageMobjWith setMobjState gs0 targetIdx inflictorIdx sourceIdx damage0
+
+def aExplode (gs0 : GameState) (mobjIdx : Nat) : Except String GameState :=
+  aExplodeWith damageMobj gs0 mobjIdx
+
+def explodeMissile (gs0 : GameState) (mobjIdx : Nat) : Except String GameState :=
+  explodeMissileWith setMobjState gs0 mobjIdx
 
 def killMobj (gs0 : GameState) (sourceIdx : Option Nat) (targetIdx : Nat) :
     Except String GameState :=

@@ -1,27 +1,84 @@
 import Doom.Playsim.Angle
+import Doom.Playsim.ChaseAmmoXviiiTest
 import Doom.Playsim.Combat
+import Doom.Playsim.CombatLTest
+import Doom.Playsim.CombatXiTest
+import Doom.Playsim.CombatXxxiTest
 import Doom.Playsim.Demo
 import Doom.Playsim.Enemy
+import Doom.Playsim.EnemyNTest
+import Doom.Playsim.EnemyXxxiiTest
 import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
+import Doom.Playsim.HitscanXiiTest
 import Doom.Playsim.Info
 import Doom.Playsim.Inter
+import Doom.Playsim.InterRTest
+import Doom.Playsim.InterXivTest
+import Doom.Playsim.InterXxiTest
+import Doom.Playsim.InterXxiiiTest
+import Doom.Playsim.InterUTest
+import Doom.Playsim.InterXxviiTest
+import Doom.Playsim.InterXxviiiTest
+import Doom.Playsim.InterXxxivTest
 import Doom.Playsim.Level
 import Doom.Playsim.Map
+import Doom.Playsim.MapXxxvTest
+import Doom.Playsim.MissileXiiiTest
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
+import Doom.Playsim.PlayerThinkMTest
+import Doom.Playsim.PlayerThinkXxivTest
+import Doom.Playsim.PlayerThinkXxviTest
+import Doom.Playsim.PosAttackXviTest
+import Doom.Playsim.Psprite
+import Doom.Playsim.SargAttackXixTest
 import Doom.Playsim.Random
 import Doom.Playsim.Sound
 import Doom.Playsim.Spawn
 import Doom.Playsim.Spec
+import Doom.Playsim.SpecXvTest
+import Doom.Playsim.SpecXxTest
+import Doom.Playsim.SpecXxxTest
+import Doom.Playsim.SpecXxxiiiTest
+import Doom.Playsim.SpecXxxviTest
+import Doom.Playsim.SpecXxxviBTest
+import Doom.Playsim.SpecXxxviiTest
+import Doom.Playsim.SpecWTest
+import Doom.Playsim.SpecYTest
+import Doom.Playsim.SpecXxxviiiTest
+import Doom.Playsim.SpecPTest
+import Doom.Playsim.SpecQTest
+import Doom.Playsim.SpecSTest
+import Doom.Playsim.SpecTTest
+import Doom.Playsim.SpecXlTest
+import Doom.Playsim.SpecXliTest
+import Doom.Playsim.SpecXliiTest
+import Doom.Playsim.SpecXliiUseTest
+import Doom.Playsim.SpecXliiiTest
+import Doom.Playsim.SpecXlivTest
+import Doom.Playsim.SpecXlvTest
+import Doom.Playsim.SpecXlviTest
+import Doom.Playsim.SpecXlviiTest
+import Doom.Playsim.SpecXlviiiTest
+import Doom.Playsim.SpecXlixTest
+import Doom.Playsim.SpecXxxixTest
+import Doom.Playsim.SpecXxvTest
 import Doom.Playsim.Tables
 import Doom.Playsim.Thinker
+import Doom.Playsim.UseLinesXviiTest
+import Doom.Playsim.Weapons
 import Doom.Wad
 
+set_option maxHeartbeats 800000
+set_option maxRecDepth 2048
+
 /-!
-P2c-ix implementation tests: A_Scream, A_Fall, T_VerticalDoor wait countdown,
-plus retained P2c-viii / P2c-vii / P2c-vi / P2c-v / P2c-iii helpers.
+P2c-xl implementation tests: `T_PlatRaise` DOWN pastdest (SpecXlTest);
+P2c-xxxix spec 88 WR plat DOWN (SpecXxxixTest);
+retained P2c-xxxviii spec 27 walk no-op; P2c-w spec 26 walk no-op (SpecWTest);
+P2c-y spec 90 use no-op (SpecYTest).
 -/
 
 open Doom.Playsim.Angle
@@ -37,12 +94,14 @@ open Doom.Playsim.Level
 open Doom.Playsim.Map
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
+open Doom.Playsim.Psprite
 open Doom.Playsim.Random
 open Doom.Playsim.Sound
 open Doom.Playsim.Spawn
 open Doom.Playsim.Spec
 open Doom.Playsim.Tables
 open Doom.Playsim.Thinker
+open Doom.Playsim.Weapons
 open Doom.Wad
 
 def assert (name : String) (cond : Bool) : IO Bool := do
@@ -261,10 +320,14 @@ def main (_args : List String) : IO UInt32 := do
         (sec.ceilingheight == FRACUNIT)) && ok
   match movePlane gsP0 0 VDOORSPEED (10 * FRACUNIT) false 0 1 with
   | Except.error e =>
-    ok := (← assert "T_MovePlane floor loud-error"
-      (e.contains "floorOrCeiling")) && ok
-  | Except.ok _ =>
-    ok := (← assert "T_MovePlane floor should loud-error" false) && ok
+    ok := (← assert s!"T_MovePlane floor UP step ({e})" false) && ok
+  | Except.ok (gsFloor, res) =>
+    ok := (← assert "T_MovePlane floor UP non-pastdest ok" (res == resultOk)) && ok
+    match gsFloor.sectors[0]? with
+    | none => ok := (← assert "T_MovePlane floor sector" false) && ok
+    | some sec =>
+      ok := (← assert "T_MovePlane floor += VDOORSPEED"
+        (sec.floorheight == VDOORSPEED)) && ok
 
   -- P_UseSpecialLine filters / T_VerticalDoor direction / monster no-close ----
   let filterLine : Line := {
@@ -368,58 +431,43 @@ def main (_args : List String) : IO UInt32 := do
     | some d =>
       ok := (← assert "T_VerticalDoor wait remaining 137 at tic 134"
         (d.topcountdown == (137 : Int32) && d.direction == 0)) && ok
-  let gsWaitZero : GameState := {
-    gsP0 with
-    verticalDoors := #[{
-      sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
-      direction := 0, topwait := VDOORWAIT, topcountdown := 1
-    }]
-  }
-  match verticalDoorThinker gsWaitZero 0 with
-  | Except.error e =>
-    ok := (← assert "T_VerticalDoor wait-expire loud-error"
-      (e == "T_VerticalDoor: direction -1 not implemented")) && ok
-  | Except.ok _ =>
-    ok := (← assert "T_VerticalDoor wait-expire should loud-error" false) && ok
-  let gsDown : GameState := {
-    gsP0 with
-    verticalDoors := #[{
-      sector := 0, type_ := vld_normal, topheight := 0, speed := VDOORSPEED
-      direction := -1, topwait := VDOORWAIT, topcountdown := 0
-    }]
-  }
-  match verticalDoorThinker gsDown 0 with
-  | Except.error e =>
-    ok := (← assert "T_VerticalDoor down-dir loud-error"
-      (e == "T_VerticalDoor: direction -1 not implemented")) && ok
-  | Except.ok _ =>
-    ok := (← assert "T_VerticalDoor down-dir should loud-error" false) && ok
   -- Monster walk over non-activatable special is a C no-op (E1M5 line 271 spec 22).
   let walkLine : Line := { filterLine with special := 22 }
   let gsWalk : GameState := { gsU with level := { gsU.level with lines := #[walkLine] } }
-  match crossSpecialLine gsWalk 0 0 0 with
+  match Doom.Playsim.Spec.crossSpecialLine gsWalk 0 0 0 with
   | Except.error e =>
     ok := (← assert s!"monster walk spec 22 no-op ({e})" false) && ok
-  | Except.ok () =>
-    ok := (← assert "monster walk spec 22 no-op" true) && ok
+  | Except.ok gsNo =>
+    ok := (← assert "monster walk spec 22 no-op"
+      (match gsNo.level.lines[0]? with
+       | some ld => ld.special == 22
+       | none => false)) && ok
   let raiseLine : Line := { filterLine with special := 4 }
   let gsRaise : GameState := { gsU with level := { gsU.level with lines := #[raiseLine] } }
-  match crossSpecialLine gsRaise 0 0 0 with
+  match Doom.Playsim.Spec.crossSpecialLine gsRaise 0 0 0 with
   | Except.error e =>
     ok := (← assert "monster walk spec 4 loud-error"
       (e.contains "P_CrossSpecialLine")) && ok
-  | Except.ok () =>
+  | Except.ok _ =>
     ok := (← assert "monster walk spec 4 should loud-error" false) && ok
+  let walkSide : Side := {
+    textureoffset := 0, rowoffset := 0
+    toptexture := ByteArray.empty, bottomtexture := ByteArray.empty
+    midtexture := ByteArray.empty, sector := 0
+  }
   let gsWalkP : GameState := {
     gsWalk with
+    level := { gsWalk.level with sides := #[walkSide] }
     mobjs := #[{ Doom.Playsim.Mobj.empty with player := 0 }]
   }
-  match crossSpecialLine gsWalkP 0 0 0 with
+  match Doom.Playsim.Spec.crossSpecialLine gsWalkP 0 0 0 with
   | Except.error e =>
-    ok := (← assert "player walk spec 22 loud-error"
-      (e.contains "P_CrossSpecialLine")) && ok
-  | Except.ok () =>
-    ok := (← assert "player walk spec 22 should loud-error" false) && ok
+    ok := (← assert s!"player walk spec 22 ({e})" false) && ok
+  | Except.ok gs22 =>
+    ok := (← assert "player walk spec 22 W1 clears special"
+      (match gs22.level.lines[0]? with
+       | some ld => ld.special == 0
+       | none => false)) && ok
   match gsU.sectors[0]? with
   | none =>
     ok := (← assert "gsU has sector 0" false) && ok
@@ -601,7 +649,7 @@ def main (_args : List String) : IO UInt32 := do
     | _, _ =>
       ok := (← assert "armor class 1 player/mobj" false) && ok
 
-  -- P2c-viii: player-target kill loud-error --------------------------------
+  -- P2c-l: player-target kill (PST_DEAD + dropWeapon, no item drop) --------
   let gsKillP := {
     gsArmor with
     mobjs := #[{ plMo with health := 1 }]
@@ -609,10 +657,21 @@ def main (_args : List String) : IO UInt32 := do
   }
   match damageMobj gsKillP 0 none none 10 with
   | Except.error e =>
-    ok := (← assert "player-target kill loud-error"
-      (e.contains "player target not implemented")) && ok
-  | Except.ok _ =>
-    ok := (← assert "player-target kill should loud-error" false) && ok
+    ok := (← assert s!"player-target kill ({e})" false) && ok
+  | Except.ok gsKill1 =>
+    match gsKill1.players[0]?, gsKill1.mobjs[0]? with
+    | some p, some mo =>
+      ok := (← assert "player-target kill PST_DEAD" (p.playerstate == PST_DEAD)) && ok
+      ok := (← assert "player-target kill clears MF_SOLID" ((mo.flags &&& MF_SOLID) == 0)) && ok
+      ok := (← assert "player-target kill deathstate 158" (mo.state == 158)) && ok
+      let psp := getPsp p.psprites ps_weapon
+      ok := (← assert "player-target kill weapon S_PISTOLDOWN"
+        (psp.state == S_PISTOLDOWN)) && ok
+      ok := (← assert "player-target kill weapon first A_Lower step"
+        (psp.sy == LOWERSPEED)) && ok
+      ok := (← assert "player-target kill no item drop" (gsKill1.mobjs.size == 1)) && ok
+    | _, _ =>
+      ok := (← assert "player-target kill player/mobj" false) && ok
 
   -- P2c-viii: A_SPosAttack no target is a no-op ----------------------------
   let gsNoT := { gsA0 with mobjs := #[{ Doom.Playsim.Mobj.empty with target := -1 }] }
@@ -874,9 +933,159 @@ def main (_args : List String) : IO UInt32 := do
       ok := (← assert "A_Fall dispatch clears MF_SOLID"
         ((mo.flags &&& MF_SOLID) == 0)) && ok
 
+  -- P2c-x: GiveWeapon dropped, A_Lower→BringUpWeapon, A_WeaponReady pending --
+  let pGun : Player := {
+    Doom.Playsim.Player.empty with
+    playerstate := PST_LIVE
+    health := 100
+    readyweapon := wp_pistol
+    pendingweapon := wp_nochange
+    weaponowned := #[1, 1, 0, 0, 0, 0, 0, 0, 0]
+    ammo := #[50, 0, 0, 0]
+    maxammo := defaultMaxAmmo
+  }
+  match giveWeapon pGun wp_shotgun true sk_medium false with
+  | Except.error e =>
+    ok := (← assert s!"GiveWeapon dropped ({e})" false) && ok
+  | Except.ok (pGot, gave) =>
+    ok := (← assert "GiveWeapon dropped gave" gave) && ok
+    ok := (← assert "GiveWeapon dropped shells=clipammo"
+      (match pGot.ammo[1]? with | some v => v == 4 | none => false)) && ok
+    ok := (← assert "GiveWeapon dropped owned shotgun"
+      (match pGot.weaponowned[2]? with | some v => v == 1 | none => false)) && ok
+    ok := (← assert "GiveWeapon dropped pending=shotgun"
+      (pGot.pendingweapon == wp_shotgun)) && ok
+    ok := (← assert "GiveWeapon dropped ready stays pistol"
+      (pGot.readyweapon == wp_pistol)) && ok
+  match giveAmmo pGun am_shell 1 sk_baby with
+  | Except.error e =>
+    ok := (← assert s!"GiveAmmo baby ({e})" false) && ok
+  | Except.ok (pBaby, _) =>
+    ok := (← assert "GiveAmmo baby doubles shells"
+      (match pBaby.ammo[1]? with | some v => v == 8 | none => false)) && ok
+  let pOwnedSg := { pGun with weaponowned := #[1, 1, 1, 0, 0, 0, 0, 0, 0] }
+  match giveAmmo pOwnedSg am_shell 1 sk_medium with
+  | Except.error e =>
+    ok := (← assert s!"GiveAmmo preference ({e})" false) && ok
+  | Except.ok (pPref, _) =>
+    ok := (← assert "GiveAmmo 0-shell preference pending=shotgun"
+      (pPref.pendingweapon == wp_shotgun)) && ok
+  let pspLow : Psprite := {
+    state := S_PISTOLDOWN, tics := 1, sx := FRACUNIT, sy := WEAPONBOTTOM - LOWERSPEED
+  }
+  let pLow : Player := {
+    pGun with
+    pendingweapon := wp_shotgun
+    weaponowned := #[1, 1, 1, 0, 0, 0, 0, 0, 0]
+    ammo := #[50, 4, 0, 0]
+    psprites := setPsp (Array.replicate NUMPSPRITES Psprite.inactive) ps_weapon pspLow
+  }
+  let gsLow := {
+    gsA0 with
+    players := Doom.Playsim.GameState.arrSet gsA0.players 0 pLow
+  }
+  match Doom.Playsim.Combat.setPsprite gsLow 0 ps_weapon S_PISTOLDOWN with
+  | Except.error e =>
+    ok := (← assert s!"A_Lower to bottom ({e})" false) && ok
+  | Except.ok gsUp =>
+    match gsUp.players[0]? with
+    | none => ok := (← assert "A_Lower player present" false) && ok
+    | some p =>
+      ok := (← assert "A_Lower ready=shotgun" (p.readyweapon == wp_shotgun)) && ok
+      ok := (← assert "A_Lower pending=wp_nochange" (p.pendingweapon == wp_nochange)) && ok
+      let psp := getPsp p.psprites ps_weapon
+      ok := (← assert "A_Lower then BringUpWeapon sy"
+        (psp.sy == WEAPONBOTTOM - RAISESPEED)) && ok
+      ok := (← assert "A_Lower then BringUpWeapon S_SGUNUP"
+        (psp.state == S_SGUNUP)) && ok
+  let moPlay := {
+    Doom.Playsim.Mobj.empty with
+    state := S_PLAY, tics := -1, player := 0
+  }
+  let pspR : Psprite := { state := S_PISTOL, tics := 1, sx := FRACUNIT, sy := WEAPONTOP }
+  let pPend : Player := {
+    pLow with
+    mo := 0
+    readyweapon := wp_pistol
+    pendingweapon := wp_shotgun
+    psprites := setPsp (Array.replicate NUMPSPRITES Psprite.inactive) ps_weapon pspR
+  }
+  let gsPend := {
+    gsA0 with
+    players := Doom.Playsim.GameState.arrSet gsA0.players 0 pPend
+    mobjs := #[moPlay]
+  }
+  match Doom.Playsim.Combat.setPsprite gsPend 0 ps_weapon S_PISTOL with
+  | Except.error e =>
+    ok := (← assert s!"A_WeaponReady pending ({e})" false) && ok
+  | Except.ok gsDown =>
+    match gsDown.players[0]? with
+    | none => ok := (← assert "A_WeaponReady pending player" false) && ok
+    | some p =>
+      ok := (← assert "A_WeaponReady pending ready stays pistol"
+        (p.readyweapon == wp_pistol)) && ok
+      ok := (← assert "A_WeaponReady pending keeps pending"
+        (p.pendingweapon == wp_shotgun && p.pendingweapon != wp_nochange)) && ok
+      let psp := getPsp p.psprites ps_weapon
+      ok := (← assert "A_WeaponReady pending starts A_Lower"
+        (psp.state == S_PISTOLDOWN)) && ok
+      ok := (← assert "A_WeaponReady pending sy += LOWERSPEED"
+        (psp.sy == WEAPONTOP + LOWERSPEED)) && ok
+
+  ok := (← Doom.Playsim.CombatLTest.checkP2cLUnits gsA0 ok) && ok
+  ok := (← Doom.Playsim.CombatXiTest.checkP2cXiUnits wad gsA0 ok) && ok
+  ok := (← Doom.Playsim.HitscanXiiTest.checkP2cXiiUnits wad ok) && ok
+  ok := (← Doom.Playsim.MissileXiiiTest.checkP2cXiiiUnits wad ok) && ok
+  ok := (← Doom.Playsim.InterXivTest.checkP2cXivUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXvTest.checkP2cXvUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxTest.checkP2cXxUnits ok) && ok
+  ok := (← Doom.Playsim.PosAttackXviTest.checkP2cXviUnits wad ok) && ok
+  ok := (← Doom.Playsim.UseLinesXviiTest.checkP2cXviiUnits wad ok) && ok
+  ok := (← Doom.Playsim.ChaseAmmoXviiiTest.checkP2cXviiiUnits wad ok) && ok
+  ok := (← Doom.Playsim.SargAttackXixTest.checkP2cXixUnits wad ok) && ok
+  ok := (← Doom.Playsim.InterXxiTest.checkP2cXxiUnits ok) && ok
+  ok := (← Doom.Playsim.InterRTest.checkP2cRUnits ok) && ok
+  ok := (← Doom.Playsim.InterXxiiiTest.checkP2cXxiiiUnits ok) && ok
+  ok := (← Doom.Playsim.PlayerThinkMTest.checkP2cMUnits ok) && ok
+  ok := (← Doom.Playsim.PlayerThinkXxivTest.checkP2cXxivUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxvTest.checkP2cXxvUnits ok) && ok
+  ok := (← Doom.Playsim.PlayerThinkXxviTest.checkP2cXxviUnits ok) && ok
+  ok := (← Doom.Playsim.InterXxviiTest.checkP2cXxviiUnits ok) && ok
+  ok := (← Doom.Playsim.InterXxviiiTest.checkP2cXxviiiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxxTest.checkP2cXxxUnits ok) && ok
+  ok := (← Doom.Playsim.CombatXxxiTest.checkP2cXxxiUnits wad ok) && ok
+  ok := (← Doom.Playsim.EnemyNTest.checkP2cNUnits ok) && ok
+  ok := (← Doom.Playsim.EnemyXxxiiTest.checkP2cXxxiiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxxiiiTest.checkP2cXxxiiiUnits ok) && ok
+  ok := (← Doom.Playsim.InterXxxivTest.checkP2cXxxivUnits ok) && ok
+  ok := (← Doom.Playsim.MapXxxvTest.checkP2cXxxvUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxxviTest.checkP2cXxxviUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxxviBTest.checkP2cXxxviBUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxxviiTest.checkP2cXxxviiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxxviiiTest.checkP2cXxxviiiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecWTest.checkP2cWUnits ok) && ok
+  ok := (← Doom.Playsim.SpecYTest.checkP2cYUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXxxixTest.checkP2cXxxixUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXlTest.checkP2cXlUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXliTest.checkP2cXliUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXliiTest.checkP2cXliiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXliiUseTest.checkP3aXliiUseUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXliiiTest.checkP2cXliiiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXlivTest.checkP2cXlivUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXlvTest.checkP2cXlvUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXlviTest.checkP2cXlviUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXlviiTest.checkP2cXlviiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXlviiiTest.checkP2cXlviiiUnits ok) && ok
+  ok := (← Doom.Playsim.SpecXlixTest.checkP2cXlixUnits ok) && ok
+  ok := (← Doom.Playsim.SpecPTest.checkP2cPUnits ok) && ok
+  ok := (← Doom.Playsim.SpecQTest.checkP2cQUnits ok) && ok
+  ok := (← Doom.Playsim.SpecSTest.checkP2cSUnits ok) && ok
+  ok := (← Doom.Playsim.SpecTTest.checkP2cTUnits ok) && ok
+  ok := (← Doom.Playsim.InterUTest.checkP2cUUnits ok) && ok
+
   if ok then
-    IO.println "ALL P2c-ix ENEMY UNIT CHECKS PASSED"
+    IO.println "ALL P2c-xl ENEMY UNIT CHECKS PASSED"
     pure 0
   else
-    IO.eprintln "SOME P2c-vi ENEMY UNIT CHECKS FAILED"
+    IO.eprintln "SOME P2c-xl ENEMY UNIT CHECKS FAILED"
     pure 1

@@ -1,14 +1,18 @@
 import Doom.Playsim.Angle
 import Doom.Playsim.Bsp
+import Doom.Playsim.Fixed
 import Doom.Playsim.Flags
 import Doom.Playsim.GameState
 import Doom.Playsim.Info
 import Doom.Playsim.Level
+import Doom.Playsim.Map
 import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
 import Doom.Playsim.Psprite
 import Doom.Playsim.Random
+import Doom.Playsim.Sound
+import Doom.Playsim.Tables
 import Doom.Playsim.Thinker
 
 /-!
@@ -22,15 +26,19 @@ namespace Doom.Playsim.Spawn
 
 open Doom.Playsim.Angle
 open Doom.Playsim.Bsp
+open Doom.Playsim.Fixed
 open Doom.Playsim.Flags
 open Doom.Playsim.GameState
 open Doom.Playsim.Info
 open Doom.Playsim.Level
+open Doom.Playsim.Map
 open Doom.Playsim.MapUtil
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
 open Doom.Playsim.Psprite
 open Doom.Playsim.Random
+open Doom.Playsim.Sound
+open Doom.Playsim.Tables
 open Doom.Playsim.Thinker
 
 /-- `p_local.h` `ONFLOORZ` = `INT_MIN`. -/
@@ -48,8 +56,27 @@ def STROBEBRIGHT : Int32 := 5
 def FASTDARK : Int32 := 15
 def SLOWDARK : Int32 := 35
 
+/-- `MT_BRUISERSHOT` ordinal in `mobjinfo`. -/
+def MT_BRUISERSHOT : Int32 := 16
 /-- `MT_SKULL` ordinal in `mobjinfo`. -/
 def MT_SKULL : Int32 := 18
+/-- `MT_TROOPSHOT` ordinal in `mobjinfo`. -/
+def MT_TROOPSHOT : Int32 := 31
+/-- `MT_HEADSHOT` ordinal in `mobjinfo`. -/
+def MT_HEADSHOT : Int32 := 32
+/-- `MT_ROCKET` ordinal in `mobjinfo`. -/
+def MT_ROCKET : Int32 := 33
+/-- `MT_PLASMA` ordinal in `mobjinfo`. -/
+def MT_PLASMA : Int32 := 34
+/-- `MT_BFG` ordinal in `mobjinfo`. -/
+def MT_BFG : Int32 := 35
+
+/-- `P_ExplodeMissile` callback so Spawn does not import Enemy. -/
+abbrev ExplodeMissileFn := GameState → Nat → Except String GameState
+
+/-- `P_AimLineAttack` callback so Spawn does not import Hitscan. -/
+abbrev AimLineAttackFn :=
+  GameState → Nat → UInt32 → Int32 → Except String (GameState × Int32 × Int32)
 
 private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
   GameState.arrSet arr i v
@@ -168,6 +195,152 @@ def spawnMobj (gs0 : GameState) (x y z : Int32) (typeId : Int32) :
               let mo5 := { mo4 with traceId := tid }
               pure ({ gs4 with mobjs := setArr gs4.mobjs mobjIdx mo5 }, mobjIdx)
 
+private def setMo (gs : GameState) (i : Nat) (mo : Mobj) : GameState :=
+  { gs with mobjs := setArr gs.mobjs i mo }
+
+/-- `P_CheckMissileSpawn`. -/
+def checkMissileSpawn (damageMobj : Map.DamageMobjFn) (explodeMissile : ExplodeMissileFn)
+    (gs0 : GameState) (thIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[thIdx]? with
+  | none => throw "P_CheckMissileSpawn: bad mobj"
+  | some th0 =>
+    let (r, rng) := pRandom gs0.rng
+    let mut tics := th0.tics - (r &&& 3)
+    if tics < 1 then tics := 1
+    let th := {
+      th0 with
+      tics
+      x := th0.x + (th0.momx >>> 1)
+      y := th0.y + (th0.momy >>> 1)
+      z := th0.z + (th0.momz >>> 1)
+    }
+    let gs := { setMo gs0 thIdx th with rng }
+    let (gs1, _, ok) ← tryMove gs thIdx th.x th.y (some damageMobj)
+    if ok then
+      pure gs1
+    else
+      explodeMissile gs1 thIdx
+
+/-- `P_SpawnMissile`. -/
+def spawnMissile (damageMobj : Map.DamageMobjFn) (explodeMissile : ExplodeMissileFn)
+    (gs0 : GameState) (sourceIdx destIdx : Nat) (typeId : Int32) :
+    Except String (GameState × Nat) := do
+  match gs0.mobjs[sourceIdx]?, gs0.mobjs[destIdx]? with
+  | none, _ => throw "P_SpawnMissile: bad source"
+  | _, none => throw "P_SpawnMissile: bad dest"
+  | some source, some dest =>
+    let (gs1, thIdx) ← spawnMobj gs0 source.x source.y (source.z + 4 * 8 * FRACUNIT) typeId
+    match gs1.mobjs[thIdx]? with
+    | none => throw "P_SpawnMissile: lost mobj"
+    | some th0 =>
+      let info ←
+        match mobjinfo[th0.typeId.toNatClampNeg]? with
+        | some i => pure i
+        | none => throw "P_SpawnMissile: missing mobjinfo"
+      let mut gs := gs1
+      if info.seesound != 0 then
+        gs := {
+          gs with
+          rng := startSoundPitchRngMaybe gs.rng info.seesound.toNatClampNeg
+            (originAudible gs thIdx)
+        }
+      match gs.mobjs[thIdx]? with
+      | none => throw "P_SpawnMissile: lost after sound"
+      | some th1 =>
+        let th := { th1 with target := sourceIdx.toInt32 }
+        gs := setMo gs thIdx th
+        let mut an := pointToAngle2 source.x source.y dest.x dest.y
+        if (dest.flags &&& MF_SHADOW) != 0 then
+          let (d, rng) := pSubRandom gs.rng
+          gs := { gs with rng }
+          an := an + (d.toUInt32 <<< 20)
+        let fine := (an >>> ANGLETOFINESHIFT.toUInt32) &&& FINEMASK
+        match finecosine[fine.toNat]?, finesine[fine.toNat]? with
+        | none, _ => throw "P_SpawnMissile: fine table OOB"
+        | _, none => throw "P_SpawnMissile: fine table OOB"
+        | some cosv, some sinv =>
+          match gs.mobjs[thIdx]? with
+          | none => throw "P_SpawnMissile: lost before mom"
+          | some th2 =>
+            let momx := fixedMul info.speed cosv
+            let momy := fixedMul info.speed sinv
+            let mut dist := MapUtil.aproxDistance (dest.x - source.x) (dest.y - source.y)
+            dist := dist / info.speed
+            if dist < 1 then dist := 1
+            let momz := (dest.z - source.z) / dist
+            gs := setMo gs thIdx { th2 with angle := an, momx, momy, momz }
+            gs ← checkMissileSpawn damageMobj explodeMissile gs thIdx
+            pure (gs, thIdx)
+
+/-- `P_SpawnPlayerMissile`. Tries to aim at a nearby monster. -/
+def spawnPlayerMissile (aimLineAttack : AimLineAttackFn)
+    (damageMobj : Map.DamageMobjFn) (explodeMissile : ExplodeMissileFn)
+    (gs0 : GameState) (sourceIdx : Nat) (typeId : Int32) :
+    Except String (GameState × Nat) := do
+  match gs0.mobjs[sourceIdx]? with
+  | none => throw "P_SpawnPlayerMissile: bad source"
+  | some source0 =>
+    let mut an := source0.angle
+    let mut gs := gs0
+    let range := 16 * 64 * FRACUNIT
+    let (gs1, slope1, lt1) ← aimLineAttack gs sourceIdx an range
+    gs := gs1
+    let mut slope := slope1
+    let mut lt := lt1
+    if lt < 0 then
+      an := an + ((1 : UInt32) <<< 26)
+      let (gs2, slope2, lt2) ← aimLineAttack gs sourceIdx an range
+      gs := gs2
+      slope := slope2
+      lt := lt2
+      if lt < 0 then
+        an := an - ((2 : UInt32) <<< 26)
+        let (gs3, slope3, lt3) ← aimLineAttack gs sourceIdx an range
+        gs := gs3
+        slope := slope3
+        lt := lt3
+      if lt < 0 then
+        an := source0.angle
+        slope := 0
+    match gs.mobjs[sourceIdx]? with
+    | none => throw "P_SpawnPlayerMissile: source lost after aim"
+    | some source =>
+      let z := source.z + 4 * 8 * FRACUNIT
+      let (gsS, thIdx) ← spawnMobj gs source.x source.y z typeId
+      match gsS.mobjs[thIdx]? with
+      | none => throw "P_SpawnPlayerMissile: lost mobj"
+      | some th0 =>
+        let info ←
+          match mobjinfo[th0.typeId.toNatClampNeg]? with
+          | some i => pure i
+          | none => throw "P_SpawnPlayerMissile: missing mobjinfo"
+        gs := gsS
+        if info.seesound != 0 then
+          gs := {
+            gs with
+            rng := startSoundPitchRngMaybe gs.rng info.seesound.toNatClampNeg
+              (originAudible gs thIdx)
+          }
+        match gs.mobjs[thIdx]? with
+        | none => throw "P_SpawnPlayerMissile: lost after sound"
+        | some th1 =>
+          let th := { th1 with target := sourceIdx.toInt32, angle := an }
+          gs := setMo gs thIdx th
+          let fine := (an >>> ANGLETOFINESHIFT.toUInt32) &&& FINEMASK
+          match finecosine[fine.toNat]?, finesine[fine.toNat]? with
+          | none, _ => throw "P_SpawnPlayerMissile: fine table OOB"
+          | _, none => throw "P_SpawnPlayerMissile: fine table OOB"
+          | some cosv, some sinv =>
+            match gs.mobjs[thIdx]? with
+            | none => throw "P_SpawnPlayerMissile: lost before mom"
+            | some th2 =>
+              let momx := fixedMul info.speed cosv
+              let momy := fixedMul info.speed sinv
+              let momz := fixedMul info.speed slope
+              gs := setMo gs thIdx { th2 with momx, momy, momz }
+              gs ← checkMissileSpawn damageMobj explodeMissile gs thIdx
+              pure (gs, thIdx)
+
 /-- `P_SpawnPlayer`. -/
 def spawnPlayer (gs0 : GameState) (mthing : Thing) : Except String GameState := do
   if mthing.typeId == 0 then
@@ -201,12 +374,17 @@ def spawnPlayer (gs0 : GameState) (mthing : Thing) : Except String GameState := 
           playerstate := PST_LIVE
           refire := 0
           viewheight := VIEWHEIGHT
+          message := none
         }
-        pure {
+        let gs3 := {
           gs2 with
           players := setArr gs2.players pnum p2
           mobjs := setArr gs2.mobjs mobjIdx mo'
         }
+        if pnum == gs3.consoleplayer then
+          pure (huStart (stInitData gs3))
+        else
+          pure gs3
     | _ => pure gs0
 
 /-- Resolve `mobjinfo` index by `doomednum`. -/

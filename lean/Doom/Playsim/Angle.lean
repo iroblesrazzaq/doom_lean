@@ -18,6 +18,8 @@ abbrev Angle := UInt32
 
 def ANG45 : UInt32 := 0x20000000
 def ANG90 : UInt32 := 0x40000000
+/-- `ANG5` (`ANG90/18`) from `p_user.c`. -/
+def ANG5 : UInt32 := ANG90 / 18
 def ANG180 : UInt32 := 0x80000000
 def ANG270 : UInt32 := 0xc0000000
 def ANG_MAX : UInt32 := 0xffffffff

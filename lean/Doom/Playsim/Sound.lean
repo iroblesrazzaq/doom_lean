@@ -1,4 +1,5 @@
 import Doom.Playsim.Fixed
+import Doom.Playsim.GameState
 import Doom.Playsim.Random
 
 /-!
@@ -12,15 +13,28 @@ Audio output itself is not simulated — only the pitch-variation RNG from
 namespace Doom.Playsim.Sound
 
 open Doom.Playsim.Fixed
+open Doom.Playsim.GameState
 open Doom.Playsim.Random
 
 /-- `sfxenum_t` values needed for pitch-branch rules (`sounds.h`, `sfx_None = 0`). -/
 def sfx_pistol : Nat := 1
 def sfx_shotgn : Nat := 2
+def sfx_firsht : Nat := 16
+def sfx_firxpl : Nat := 17
+def sfx_pstart : Nat := 18
 def sfx_sawup : Nat := 10
 def sfx_sawhit : Nat := 13
+def sfx_slop : Nat := 31
 def sfx_itemup : Nat := 32
+def sfx_claw : Nat := 55
+def sfx_pldeth : Nat := 57
+def sfx_pdiehi : Nat := 58
+def sfx_wpnup : Nat := 33
+def sfx_pstop : Nat := 19
 def sfx_doropn : Nat := 20
+def sfx_dorcls : Nat := 21
+def sfx_stnmov : Nat := 22
+def sfx_swtchn : Nat := 23
 def sfx_oof : Nat := 34
 def sfx_posit1 : Nat := 36
 def sfx_posit2 : Nat := 37
@@ -32,6 +46,7 @@ def sfx_podth2 : Nat := 60
 def sfx_podth3 : Nat := 61
 def sfx_bgdth1 : Nat := 62
 def sfx_bgdth2 : Nat := 63
+def sfx_noway : Nat := 81
 def sfx_tink : Nat := 87
 
 /--
@@ -84,5 +99,21 @@ def soundAudible (lx ly sx sy : Int32) : Bool :=
 def startSoundPitchRngMaybe (rng : RandomState) (sfxId : Nat) (audible : Bool) :
     RandomState :=
   if audible then startSoundPitchRng rng sfxId else rng
+
+/--
+`S_StartSound` origin vs consoleplayer: player/null origins skip
+`S_AdjustSoundParams`; distant origins may return before pitch `M_Random`.
+-/
+def originAudible (gs : GameState) (originIdx : Nat) : Bool :=
+  match gs.players[gs.consoleplayer]? with
+  | none => true
+  | some pl =>
+    if pl.mo == originIdx.toInt32 then
+      true
+    else
+      match gs.mobjs[pl.mo.toNatClampNeg]?, gs.mobjs[originIdx]? with
+      | some listener, some origin =>
+        soundAudible listener.x listener.y origin.x origin.y
+      | _, _ => true
 
 end Doom.Playsim.Sound

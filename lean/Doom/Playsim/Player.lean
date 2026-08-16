@@ -12,6 +12,23 @@ def NUMWEAPONS : Nat := 9
 def NUMAMMO : Nat := 4
 def NUMPSPRITES : Nat := 2
 def NUMPOWERS : Nat := 6
+def NUMCARDS : Nat := 6
+
+/-- `powertype_t` (`doomdef.h`). -/
+def pw_invulnerability : Nat := 0
+def pw_strength : Nat := 1
+def pw_invisibility : Nat := 2
+def pw_ironfeet : Nat := 3
+def pw_allmap : Nat := 4
+def pw_infrared : Nat := 5
+
+/-- `card_t` (`doomdef.h`). -/
+def it_bluecard : Nat := 0
+def it_yellowcard : Nat := 1
+def it_redcard : Nat := 2
+def it_blueskull : Nat := 3
+def it_yellowskull : Nat := 4
+def it_redskull : Nat := 5
 
 /-- `weapontype_t`: `wp_fist`..`wp_supershotgun`, then `NUMWEAPONS`, then `wp_nochange`. -/
 def wp_fist : Int32 := 0
@@ -27,6 +44,8 @@ def wp_nochange : Int32 := 10
 
 /-- `d_event.h` `BT_ATTACK`. -/
 def BT_ATTACK : UInt32 := 1
+/-- `d_event.h` `BT_USE`. -/
+def BT_USE : UInt32 := 2
 
 def PST_LIVE : Int32 := 0
 def PST_DEAD : Int32 := 1
@@ -43,7 +62,7 @@ structure TicCmd where
   sidemove : Int32
   angleturn : Int32
   buttons : UInt32
-  deriving Repr
+  deriving Repr, BEq
 
 def TicCmd.zero : TicCmd := {
   forwardmove := 0
@@ -94,11 +113,17 @@ structure Player where
   powers : Array Int32
   damagecount : Int32
   bonuscount : Int32
+  /-- `player_t.cards[NUMCARDS]`. -/
+  cards : Array Bool
   usedown : Bool
   attackdown : Bool
   cheats : Int32
   /-- `player_t.extralight` (untraced; `A_Light1` writes it). -/
   extralight : Int32
+  /-- `player_t.attacker` mobj index, or `-1` if none. -/
+  attacker : Int32
+  /-- Untraced `player_t.message`; `none` = C NULL. Not in TraceFormat. -/
+  message : Option String
   deriving Repr
 
 def defaultMaxAmmo : Array Int32 := #[200, 50, 300, 50]
@@ -128,10 +153,13 @@ def empty : Player := {
   powers := Array.replicate NUMPOWERS 0
   damagecount := 0
   bonuscount := 0
+  cards := Array.replicate NUMCARDS false
   usedown := false
   attackdown := false
   cheats := 0
   extralight := 0
+  attacker := -1
+  message := none
 }
 
 private def arrSet (arr : Array Int32) (i : Nat) (v : Int32) : Array Int32 :=
@@ -152,6 +180,7 @@ def playerReborn (p : Player) : Player :=
     killcount := p.killcount
     itemcount := p.itemcount
     secretcount := p.secretcount
+    usedown := true
   }
 
 end Doom.Playsim.Player

@@ -3,6 +3,7 @@ import Doom.Playsim.Flags
 import Doom.Playsim.Fixed
 import Doom.Playsim.GameState
 import Doom.Playsim.Info
+import Doom.Playsim.Inter
 import Doom.Playsim.Map
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
@@ -15,7 +16,8 @@ import Doom.Playsim.Thinker
 # Doom.Playsim.Think
 
 `P_MobjThinker`, `P_ZMovement`, light thinkers (`p_lights.c`).
-Enemy actions / `P_SetMobjState` live in `Enemy` (P2c-iii).
+Enemy actions / `P_SetMobjState` live in `Enemy` (P2c-iii). Missile XY/Z
+explode lives here and calls `Enemy.explodeMissile`.
 -/
 
 namespace Doom.Playsim.Think
@@ -25,6 +27,7 @@ open Doom.Playsim.Flags
 open Doom.Playsim.Fixed
 open Doom.Playsim.GameState
 open Doom.Playsim.Info
+open Doom.Playsim.Inter
 open Doom.Playsim.Map
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
@@ -52,6 +55,20 @@ private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
 
 private def setMo (gs : GameState) (i : Nat) (mo : Mobj) : GameState :=
   { gs with mobjs := setArr gs.mobjs i mo }
+
+/-- True while this mobj still has a live `THF_MOBJ` thinker (`P_RemoveMobj` clears it). -/
+private def mobjHasMobjThinker (gs : GameState) (mobjIdx : Nat) : Bool :=
+  Id.run do
+    let mut i : Nat := 0
+    let mut found := false
+    while i < gs.thinkers.size do
+      match gs.thinkers[i]? with
+      | some th =>
+        if th.func == THF_MOBJ && th.payload.toNat == mobjIdx then
+          found := true
+      | none => pure ()
+      i := i + 1
+    pure found
 
 /-- `P_XYMovement` (`p_mobj.c`). -/
 def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
@@ -89,7 +106,8 @@ def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
             (moCur.x + xmove, moCur.y + ymove, (0 : Int32), (0 : Int32))
         xmove := xmove'
         ymove := ymove'
-        let (gs1, _, ok) ← tryMove gs mobjIdx ptryx ptryy
+        let (gs1, scr, ok) ← tryMove gs mobjIdx ptryx ptryy (some damageMobj)
+          (some Spec.crossSpecialLine)
         gs := gs1
         if !ok then
           match gs.mobjs[mobjIdx]? with
@@ -97,9 +115,11 @@ def xyMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
           | some moB =>
             if moB.player >= 0 then
               -- P_SlideMove (may also pick up MF_SPECIAL via TryMove/CheckPosition)
-              gs ← slideMove gs mobjIdx
+              gs ← slideMove gs mobjIdx (some Spec.crossSpecialLine)
             else if (moB.flags &&& MF_MISSILE) != 0 then
-              throw "P_XYMovement: missile explode not implemented"
+              if ceilinglineIsSky gs scr then
+                return (← removeMobj gs mobjIdx)
+              gs ← explodeMissile gs mobjIdx
             else
               gs := setMo gs mobjIdx { moB with momx := 0, momy := 0 }
               xmove := 0
@@ -196,7 +216,7 @@ def zMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
       mo := { mo with z := mo.floorz }
       gs := setMo gs mobjIdx mo
       if (mo.flags &&& MF_MISSILE) != 0 && (mo.flags &&& MF_NOCLIP) == 0 then
-        throw "P_ZMovement: missile floor explode not implemented"
+        return (← explodeMissile gs mobjIdx)
     else if (mo.flags &&& MF_NOGRAVITY) == 0 then
       let momz :=
         if mo.momz == 0 then -GRAVITY * 2
@@ -216,7 +236,7 @@ def zMovement (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := do
         if (mo2.flags &&& MF_SKULLFLY) != 0 then
           throw "P_ZMovement: MF_SKULLFLY ceiling bounce not implemented"
         if (mo2.flags &&& MF_MISSILE) != 0 && (mo2.flags &&& MF_NOCLIP) == 0 then
-          throw "P_ZMovement: missile ceiling explode not implemented"
+          return (← explodeMissile gs mobjIdx)
         pure gs
       else
         pure gs
@@ -229,14 +249,15 @@ def mobjThinker (gs0 : GameState) (mobjIdx : Nat) : Except String GameState := d
     let mut gs := gs0
     if mo.momx != 0 || mo.momy != 0 || (mo.flags &&& MF_SKULLFLY) != 0 then
       gs ← xyMovement gs mobjIdx
-      match gs.mobjs[mobjIdx]? with
-      | none => return gs  -- removed (not expected)
-      | some _ => pure ()
+      if !mobjHasMobjThinker gs mobjIdx then
+        return gs
     match gs.mobjs[mobjIdx]? with
     | none => return gs
     | some mo2 =>
       if mo2.z != mo2.floorz || mo2.momz != 0 then
         gs ← zMovement gs mobjIdx
+        if !mobjHasMobjThinker gs mobjIdx then
+          return gs
       -- Re-fetch after Z — no stale writes into the tic countdown.
       match gs.mobjs[mobjIdx]? with
       | none => return gs
@@ -357,6 +378,10 @@ def runOneThinker (gs : GameState) (th : Thinker) : Except String GameState := d
     glowThinker gs th.payload.toNat
   else if th.func == THF_VERTICALDOOR then
     verticalDoorThinker gs th.payload.toNat
+  else if th.func == THF_PLATRAISE then
+    platRaiseThinker gs th.payload.toNat
+  else if th.func == THF_MOVEFLOOR then
+    floorMoveThinker gs th.payload.toNat
   else
     throw s!"P_RunThinkers: unimplemented THF {th.func}"
 

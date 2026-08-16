@@ -1,9 +1,12 @@
 import Doom.Playsim.Angle
 import Doom.Playsim.Combat
+import Doom.Playsim.Enemy
 import Doom.Playsim.Fixed
+import Doom.Playsim.Flags
 import Doom.Playsim.GameState
 import Doom.Playsim.Mobj
 import Doom.Playsim.Player
+import Doom.Playsim.Spec
 import Doom.Playsim.Tables
 import Doom.Playsim.Think
 
@@ -18,17 +21,27 @@ namespace Doom.Playsim.PlayerThink
 open Doom.Playsim.Angle
 open Doom.Playsim.Combat
 open Doom.Playsim.Fixed
+open Doom.Playsim.Flags
 open Doom.Playsim.GameState
 open Doom.Playsim.Mobj
 open Doom.Playsim.Player
+open Doom.Playsim.Spec
 open Doom.Playsim.Tables
 open Doom.Playsim.Think
 
 private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
   if h : i < arr.size then arr.set i v else arr
 
+/-- C `if (powers[idx]) powers[idx] += delta`; zero stays zero. -/
+private def adjPower (p : Player) (idx : Nat) (delta : Int32) : Player :=
+  match p.powers[idx]? with
+  | some v =>
+    if v != 0 then { p with powers := setArr p.powers idx (v + delta) } else p
+  | none => p
+
 def MAXBOB : Int32 := 0x100000
 def CF_NOMOMENTUM : Int32 := 8
+def DEATH_VIEWHEIGHT : Int32 := 6 * FRACUNIT
 
 /-- `P_Thrust` — `finecosine = finesine+2048` indexing via `Tables.finecosine`. -/
 def thrust (gs : GameState) (playerIdx : Nat) (angle : UInt32) (move : Int32) :
@@ -98,6 +111,63 @@ def calcHeight (gs : GameState) (playerIdx : Nat) (onground : Bool) :
         player := { player with viewz }
         pure { gs with players := setArr gs.players playerIdx player }
 
+/-- `P_DeathThink` — no `P_Random`. -/
+def deathThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState := do
+  match gs0.players[playerIdx]? with
+  | none => throw "P_DeathThink: bad player"
+  | some player0 =>
+    let mut gs := gs0
+    let mut pDeath := player0
+    gs ← Combat.movePsprites gs playerIdx
+    match gs.players[playerIdx]? with
+    | none => throw "P_DeathThink: lost player after psprites"
+    | some p1 => pDeath := p1
+    if pDeath.viewheight > DEATH_VIEWHEIGHT then
+      pDeath := { pDeath with viewheight := pDeath.viewheight - FRACUNIT }
+    if pDeath.viewheight < DEATH_VIEWHEIGHT then
+      pDeath := { pDeath with viewheight := DEATH_VIEWHEIGHT }
+    pDeath := { pDeath with deltaviewheight := 0 }
+    gs := { gs with players := setArr gs.players playerIdx pDeath }
+    match gs.mobjs[pDeath.mo.toNatClampNeg]? with
+    | none => throw "P_DeathThink: bad mo"
+    | some mo0 =>
+      let onground := mo0.z <= mo0.floorz
+      gs ← calcHeight gs playerIdx onground
+      match gs.players[playerIdx]? with
+      | none => throw "P_DeathThink: lost player after calcHeight"
+      | some player1 =>
+        match gs.mobjs[player1.mo.toNatClampNeg]? with
+        | none => throw "P_DeathThink: lost mo after calcHeight"
+        | some mo1 =>
+          let mut pOut := player1
+          let mut moOut := mo1
+          if player1.attacker >= 0 && player1.attacker != player1.mo then
+            match gs.mobjs[player1.attacker.toNatClampNeg]? with
+            | none => throw "P_DeathThink: bad attacker"
+            | some att =>
+              let angle := pointToAngle2 mo1.x mo1.y att.x att.y
+              let delta := angle - mo1.angle
+              if delta < ANG5 || delta > (0 : UInt32) - ANG5 then
+                moOut := { mo1 with angle := angle }
+                if player1.damagecount > 0 then
+                  pOut := { player1 with damagecount := player1.damagecount - 1 }
+              else if delta < ANG180 then
+                moOut := { mo1 with angle := mo1.angle + ANG5 }
+              else
+                moOut := { mo1 with angle := mo1.angle - ANG5 }
+          else if player1.damagecount > 0 then
+            pOut := { player1 with damagecount := player1.damagecount - 1 }
+          gs := { gs with
+            mobjs := setArr gs.mobjs player1.mo.toNatClampNeg moOut
+            players := setArr gs.players playerIdx pOut
+          }
+          if (pOut.cmd.buttons &&& BT_USE) != 0 then
+            pure { gs with
+              players := setArr gs.players playerIdx { pOut with playerstate := PST_REBORN }
+            }
+          else
+            pure gs
+
 /-- `P_MovePlayer`. -/
 def movePlayer (gs0 : GameState) (playerIdx : Nat) : Except String (GameState × Bool) := do
   match gs0.players[playerIdx]? with
@@ -129,11 +199,14 @@ def movePlayer (gs0 : GameState) (playerIdx : Nat) : Except String (GameState ×
 
 /--
 `P_PlayerInSpecialSector` open subset: early-out when not on sector floor;
-nukage/slime damage gated by `leveltime&0x1f` (no-op when non-zero); other
-specials / actual damage are loud-errors.
+nukage (`special=7`) calls `P_DamageMobj(..., 5)` on the ironfeet+beat gate;
+hellslime (`special=5`) still loud-errors on that same gate; secret
+(`special=9`) wrapping-increments `secretcount` and clears
+`sectors[secIdx].special`. Other specials are loud-errors. No `P_Random`
+here; ironfeet is truthiness only.
 -/
 def playerInSpecialSector (gs : GameState) (playerIdx : Nat)
-    (sec : SectorRuntime) : Except String GameState := do
+    (secIdx : Nat) (sec : SectorRuntime) : Except String GameState := do
   match gs.players[playerIdx]? with
   | none => throw "P_PlayerInSpecialSector: bad player"
   | some player =>
@@ -143,28 +216,37 @@ def playerInSpecialSector (gs : GameState) (playerIdx : Nat)
       -- Falling, not all the way down yet?
       if mo.z != sec.floorheight then
         return gs
-      -- `pw_ironfeet` = 3
-      let ironfeet := match player.powers[3]? with | some v => v | none => (0 : Int32)
+      let ironfeet := match player.powers[pw_ironfeet]? with | some v => v | none => (0 : Int32)
       if sec.special == 5 || sec.special == 7 then
         if ironfeet == 0 && (gs.leveltime &&& (0x1f : UInt32)) == 0 then
-          throw s!"P_PlayerInSpecialSector: damage special={sec.special}"
-        pure gs
+          if sec.special == 7 then
+            Enemy.damageMobj gs player.mo.toNatClampNeg none none (5 : Int32)
+          else
+            throw s!"P_PlayerInSpecialSector: damage special={sec.special}"
+        else
+          pure gs
       else if sec.special == 4 || sec.special == 16 then
         throw s!"P_PlayerInSpecialSector: strobe/super slime special={sec.special}"
       else if sec.special == 9 then
-        throw "P_PlayerInSpecialSector: secret sector not implemented"
+        pure {
+          gs with
+          players := setArr gs.players playerIdx
+            { player with secretcount := player.secretcount + 1 }
+          sectors := setArr gs.sectors secIdx { sec with special := 0 }
+        }
       else if sec.special == 11 then
         throw "P_PlayerInSpecialSector: exit super damage not implemented"
       else
         throw s!"P_PlayerInSpecialSector: unknown special {sec.special}"
 
-/-- `P_PlayerThink` (live, pendingweapon == wp_nochange). -/
+/-- `P_PlayerThink` (live). Pending weapon change is left to `A_WeaponReady`. -/
 def playerThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState := do
   match gs0.players[playerIdx]? with
   | none => throw "P_PlayerThink: bad player"
   | some player0 =>
     if player0.playerstate == PST_DEAD then
-      throw "P_PlayerThink: death path not implemented"
+      deathThink gs0 playerIdx
+    else
     match gs0.mobjs[player0.mo.toNatClampNeg]? with
     | none => throw "P_PlayerThink: bad mo"
     | some mo0 =>
@@ -178,7 +260,7 @@ def playerThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState :=
         gs := gs1
         onground := og
       gs ← calcHeight gs playerIdx onground
-      -- special sector
+      -- special sector (may update player health/armor via P_DamageMobj)
       match gs.players[playerIdx]? with
       | none => throw "P_PlayerThink: lost player"
       | some player =>
@@ -192,17 +274,52 @@ def playerThink (gs0 : GameState) (playerIdx : Nat) : Except String GameState :=
             | none => throw "P_PlayerThink: bad sector"
             | some sec =>
               if sec.special != 0 then
-                gs ← playerInSpecialSector gs playerIdx sec
-          let cmd := player.cmd
-          if (cmd.buttons &&& 128) != 0 then  -- BT_SPECIAL approx — unused early
-            pure ()
-          if (cmd.buttons &&& 4) != 0 then  -- BT_CHANGE
-            throw "P_PlayerThink: weapon change not implemented"
-          if player.pendingweapon != wp_nochange then
-            throw "P_PlayerThink: pendingweapon != wp_nochange unexpected"
-          if (cmd.buttons &&& 2) != 0 then  -- BT_USE
-            throw "P_PlayerThink: use not implemented"
-          gs ← Combat.movePsprites gs playerIdx
-          pure gs
+                gs ← playerInSpecialSector gs playerIdx ss.sector.toNat sec
+      -- Re-fetch: usedown latch must not restore a pre-damage player snapshot.
+      match gs.players[playerIdx]? with
+      | none => throw "P_PlayerThink: lost player after special"
+      | some player =>
+        let cmd := player.cmd
+        if (cmd.buttons &&& 128) != 0 then  -- BT_SPECIAL approx — unused early
+          pure ()
+        if (cmd.buttons &&& 4) != 0 then  -- BT_CHANGE
+          throw "P_PlayerThink: weapon change not implemented"
+        if (cmd.buttons &&& BT_USE) != 0 then
+          if !player.usedown then
+            gs ← useLines gs playerIdx
+            match gs.players[playerIdx]? with
+            | none => throw "P_PlayerThink: lost player after use"
+            | some pUse =>
+              gs := { gs with players := setArr gs.players playerIdx { pUse with usedown := true } }
+        else
+          gs := { gs with players := setArr gs.players playerIdx { player with usedown := false } }
+        gs ← Combat.movePsprites gs playerIdx
+        -- C `P_PlayerThink` live counters (`p_user.c`); untraced.
+        match gs.players[playerIdx]? with
+        | none => throw "P_PlayerThink: lost player after psprites"
+        | some pEnd =>
+          let mut p := pEnd
+          p := adjPower p pw_strength 1
+          p := adjPower p pw_invulnerability (-1)
+          match p.powers[pw_invisibility]? with
+          | some v =>
+            if v != 0 then
+              let v' := v - 1
+              p := { p with powers := setArr p.powers pw_invisibility v' }
+              if v' == 0 then
+                match gs.mobjs[p.mo.toNatClampNeg]? with
+                | none => throw "P_PlayerThink: lost mo clearing MF_SHADOW"
+                | some mo =>
+                  gs := { gs with
+                    mobjs := setArr gs.mobjs p.mo.toNatClampNeg
+                      { mo with flags := mo.flags &&& (~~~MF_SHADOW) } }
+          | none => pure ()
+          p := adjPower p pw_infrared (-1)
+          p := adjPower p pw_ironfeet (-1)
+          if p.damagecount != 0 then
+            p := { p with damagecount := p.damagecount - 1 }
+          if p.bonuscount != 0 then
+            p := { p with bonuscount := p.bonuscount - 1 }
+          pure { gs with players := setArr gs.players playerIdx p }
 
 end Doom.Playsim.PlayerThink

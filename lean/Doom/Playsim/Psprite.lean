@@ -19,6 +19,7 @@ open Doom.Playsim.Weapons
 def WEAPONBOTTOM : Int32 := 128 * FRACUNIT
 def WEAPONTOP : Int32 := 32 * FRACUNIT
 def RAISESPEED : Int32 := 6 * FRACUNIT
+def LOWERSPEED : Int32 := RAISESPEED
 
 def setPsp (ps : Array Psprite) (pos : Nat) (v : Psprite) : Array Psprite :=
   if h : pos < ps.size then ps.set pos v else ps
@@ -70,6 +71,27 @@ def setPsprite (p0 : Player) (position : Nat) (stnum0 : UInt32) : Except String 
           let wi ← weaponAt p.readyweapon
           stnum := wi.readystate
           contRaise := true
+      else if st.action == action_A_Lower then
+        let pspL := getPsp p.psprites position
+        let syL := pspL.sy + LOWERSPEED
+        if syL < WEAPONBOTTOM then
+          p := { p with psprites := setPsp p.psprites position { pspL with sy := syL } }
+        else if p.playerstate == PST_DEAD then
+          p := { p with psprites := setPsp p.psprites position { pspL with sy := WEAPONBOTTOM } }
+        else if p.health == 0 then
+          throw "A_Lower: health==0 not implemented"
+        else
+          let pending :=
+            if p.pendingweapon == wp_nochange then p.readyweapon else p.pendingweapon
+          p := {
+            p with
+            readyweapon := pending
+            pendingweapon := wp_nochange
+            psprites := setPsp p.psprites position { pspL with sy := WEAPONBOTTOM }
+          }
+          let wi ← weaponAt pending
+          stnum := wi.upstate
+          contRaise := true
       else if st.action == action_A_WeaponReady then
         pure ()
       else if st.action != actionNull then
@@ -96,6 +118,11 @@ def bringUpWeapon (p0 : Player) : Except String Player := do
     psprites := setPsp p0.psprites ps_weapon { psp with sy := WEAPONBOTTOM }
   }
   setPsprite p ps_weapon wi.upstate
+
+/-- `P_DropWeapon` — enter `readyweapon.downstate` on `ps_weapon`. -/
+def dropWeapon (p0 : Player) : Except String Player := do
+  let wi ← weaponAt p0.readyweapon
+  setPsprite p0 ps_weapon wi.downstate
 
 /-- `P_SetupPsprites`. -/
 def setupPsprites (p0 : Player) : Except String Player := do

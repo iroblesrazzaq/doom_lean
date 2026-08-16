@@ -7,6 +7,7 @@ import Doom.Playsim.Level
 import Doom.Playsim.MapUtil
 import Doom.Playsim.Mobj
 import Doom.Playsim.Random
+import Doom.Playsim.Sight
 import Doom.Playsim.Spawn
 import Doom.Playsim.Tables
 import Doom.Playsim.Weapons
@@ -14,8 +15,9 @@ import Doom.Playsim.Weapons
 /-!
 # Doom.Playsim.Hitscan
 
-`P_AimLineAttack` / `P_LineAttack` / puff+blood (`p_map.c` / `p_mobj.c`).
-Does not import Enemy or Combat; `P_LineAttack` takes a `P_DamageMobj` callback.
+`P_AimLineAttack` / `P_LineAttack` / puff+blood / `P_RadiusAttack`
+(`p_map.c` / `p_mobj.c`). Does not import Enemy or Combat; attacks take a
+`P_DamageMobj` callback.
 -/
 
 namespace Doom.Playsim.Hitscan
@@ -114,14 +116,6 @@ private def mkTrace (bmap : BlockMap) (x1_0 y1_0 x2 y2 : Int32) : Divline :=
 
 private def aimSlopes : Int32 :=
   (SCREENHEIGHT / 2) * FRACUNIT / (SCREENWIDTH / 2)
-
-private def byteAt (pic : ByteArray) (i : Nat) : UInt8 :=
-  match pic[i]? with | some b => b | none => 0
-
-private def isSkyPic (pic : ByteArray) : Bool :=
-  pic.size >= 6 && byteAt pic 0 == 70 && byteAt pic 1 == 95 &&
-    byteAt pic 2 == 83 && byteAt pic 3 == 75 && byteAt pic 4 == 89 &&
-    byteAt pic 5 == 49
 
 /-- `P_SpawnPuff`. -/
 def spawnPuff (gs0 : GameState) (attackrange x y z0 : Int32) :
@@ -383,5 +377,69 @@ def lineAttack (damageMobj : DamageMobjFn) (gs0 : GameState) (mobjIdx : Nat)
       (PT_ADDLINES ||| PT_ADDTHINGS) fun gs st inn =>
         ptrShootTraverse damageMobj gs st inn
     pure gs1
+
+/-- `mobjtype_t` bosses immune to concussion (`PIT_RadiusAttack`). -/
+def MT_SPIDER : Int32 := 19
+def MT_CYBORG : Int32 := 21
+
+/-- Scratch for `P_RadiusAttack` / `PIT_RadiusAttack`. -/
+structure RadiusAttackState where
+  spotIdx : Nat
+  sourceIdx : Option Nat
+  bombdamage : Int32
+
+/-- `PIT_RadiusAttack`. Origin skip is C `!MF_SHOOTABLE` (no pointer equality). -/
+def pitRadiusAttack (damageMobj : DamageMobjFn) (gs0 : GameState) (st : RadiusAttackState)
+    (thingIdx : Nat) (_mo : Mobj) : Except String (GameState × RadiusAttackState × Bool) := do
+  match gs0.mobjs[thingIdx]? with
+  | none => throw "PIT_RadiusAttack: bad thing"
+  | some thing =>
+    if (thing.flags &&& MF_SHOOTABLE) == 0 then
+      return (gs0, st, true)
+    if thing.typeId == MT_CYBORG || thing.typeId == MT_SPIDER then
+      return (gs0, st, true)
+    match gs0.mobjs[st.spotIdx]? with
+    | none => throw "PIT_RadiusAttack: bad bombspot"
+    | some bombspot =>
+      let dx := wabs (thing.x - bombspot.x)
+      let dy := wabs (thing.y - bombspot.y)
+      let cheby := if dx > dy then dx else dy
+      let mut dist := (cheby - thing.radius) >>> 16
+      if dist < 0 then
+        dist := 0
+      if dist >= st.bombdamage then
+        return (gs0, st, true)
+      let (gs1, visible) ← Sight.checkSight gs0 thing bombspot
+      if !visible then
+        return (gs1, st, true)
+      let gs2 ← damageMobj gs1 thingIdx (some st.spotIdx) st.sourceIdx (st.bombdamage - dist)
+      pure (gs2, st, true)
+
+/-- `P_RadiusAttack`. Block box matches C `(damage+MAXRADIUS)<<FRACBITS` wrap. -/
+def radiusAttack (damageMobj : DamageMobjFn) (gs0 : GameState) (spotIdx : Nat)
+    (sourceIdx : Option Nat) (damage : Int32) : Except String GameState := do
+  match gs0.mobjs[spotIdx]? with
+  | none => throw "P_RadiusAttack: bad spot"
+  | some spot =>
+    let dist := (damage + MAXRADIUS) <<< 16
+    let bmap := gs0.level.blockmap
+    let yh := ashrMapBlock (spot.y + dist - bmap.originY)
+    let yl := ashrMapBlock (spot.y - dist - bmap.originY)
+    let xh := ashrMapBlock (spot.x + dist - bmap.originX)
+    let xl := ashrMapBlock (spot.x - dist - bmap.originX)
+    let st0 : RadiusAttackState := { spotIdx, sourceIdx, bombdamage := damage }
+    let mut gs := gs0
+    let mut st := st0
+    let mut y := yl
+    while y <= yh do
+      let mut x := xl
+      while x <= xh do
+        let (gs1, st1, _) ← blockThingsIterator gs st x y fun gs st mi mo =>
+          pitRadiusAttack damageMobj gs st mi mo
+        gs := gs1
+        st := st1
+        x := x + 1
+      y := y + 1
+    pure gs
 
 end Doom.Playsim.Hitscan
