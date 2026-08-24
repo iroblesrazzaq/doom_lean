@@ -12,44 +12,83 @@ jobs:
       - uses: actions/checkout@v4
       - name: Self-test tools
         run: bash tools/tests/run_tests.sh
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lean
+          build: false
+          test: false
+          lint: false
       - name: Playsim gate
         run: |
           set -euo pipefail
-          REF_DIG="${REF_DIG:-fixtures/ref.dig}"
-          CAND_DIG="${CAND_DIG:-fixtures/cand.dig}"
-          if [[ ! -f "$REF_DIG" || ! -f "$CAND_DIG" ]]; then
-            echo "SKIP: playsim gate — digest artifacts not present yet (milestone 0)"
-            echo "looked for REF_DIG=$REF_DIG CAND_DIG=$CAND_DIG"
-            exit 0
+          if [[ -f "${HOME}/.elan/env" ]]; then
+            # shellcheck disable=SC1091
+            source "${HOME}/.elan/env"
           fi
-          export REF_DIG CAND_DIG
-          if [[ -f "${REF_TRC:-fixtures/ref.trc}" && -f "${CAND_TRC:-fixtures/cand.trc}" ]]; then
-            export REF_TRC="${REF_TRC:-fixtures/ref.trc}"
-            export CAND_TRC="${CAND_TRC:-fixtures/cand.trc}"
+          ROOT="$(pwd)"
+          if [[ -n "${RUNNER_TEMP:-}" ]]; then
+            OUT="${RUNNER_TEMP}/playsim_cand"
+          else
+            OUT="${ROOT}/.agent_tmp/ci_playsim"
           fi
-          bash tools/ci/gate_playsim.sh
+          mkdir -p "${OUT}/demo1" "${OUT}/demo2" "${OUT}/demo3"
+
+          generate() {
+            local demo="$1" tics="$2" ref_dig="$3" ref_trc="$4" dest="$5"
+            (cd "${ROOT}/lean" && lake exe verify -- \
+              --iwad "${ROOT}/fixtures/wads/doom1.wad" \
+              --impl real \
+              --root "${ROOT}" \
+              --out-dir "${dest}" \
+              --demo "${demo}" \
+              --tics "${tics}" \
+              --ref-digest "${ref_dig}" \
+              --ref-trace "${ref_trc}")
+            if [[ ! -f "${dest}/candidate.dig" || ! -f "${dest}/candidate.trc" ]]; then
+              echo "GATE FAIL: playsim (missing cand after generate in ${dest})"
+              exit 1
+            fi
+            REF_DIG="${ref_dig}" CAND_DIG="${dest}/candidate.dig" \
+              REF_TRC="${ref_trc}" CAND_TRC="${dest}/candidate.trc" \
+              bash "${ROOT}/tools/ci/gate_playsim.sh"
+          }
+
+          generate DEMO1 5026 \
+            "${ROOT}/fixtures/demo1.dig" "${ROOT}/fixtures/demo1.trc" \
+            "${OUT}/demo1"
+          generate DEMO2 3836 \
+            "${ROOT}/fixtures/demo2.dig" "${ROOT}/fixtures/demo2.trc" \
+            "${OUT}/demo2"
+          generate DEMO3 2134 \
+            "${ROOT}/fixtures/holdout/demo3.dig" "${ROOT}/fixtures/holdout/demo3.trc" \
+            "${OUT}/demo3"
 
   renderer:
     name: renderer
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lean
+          build: false
+          test: false
+          lint: false
       - name: Renderer gate
         run: |
           set -euo pipefail
-          REF_DIR="${REF_DIR:-fixtures/fb/ref}"
-          CAND_DIR="${CAND_DIR:-fixtures/fb/cand}"
-          if [[ ! -d "$REF_DIR" || ! -d "$CAND_DIR" ]]; then
-            echo "SKIP: renderer gate — framebuffer dirs not present yet (milestone 0)"
-            echo "looked for REF_DIR=$REF_DIR CAND_DIR=$CAND_DIR"
-            exit 0
+          if [[ -f "${HOME}/.elan/env" ]]; then
+            # shellcheck disable=SC1091
+            source "${HOME}/.elan/env"
           fi
-          # Require at least one fb_*.ppm in ref to consider the gate runnable.
-          if ! ls "$REF_DIR"/fb_*.ppm >/dev/null 2>&1; then
-            echo "SKIP: renderer gate — no fb_*.ppm in $REF_DIR yet (milestone 0)"
-            exit 0
+          ROOT="$(pwd)"
+          (cd lean && lake exe fb-test)
+          CAND="${ROOT}/.agent_tmp/fb_cand"
+          if [[ ! -d "${CAND}" ]] || ! ls "${CAND}"/fb_*.ppm >/dev/null 2>&1; then
+            echo "GATE FAIL: renderer (missing cand in ${CAND})"
+            exit 1
           fi
-          bash tools/ci/gate_renderer.sh "$REF_DIR" "$CAND_DIR"
+          bash tools/ci/gate_renderer.sh fixtures/fb/demo1 .agent_tmp/fb_cand
 
   static:
     name: static
@@ -64,16 +103,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lean
+          build: false
+          test: false
+          lint: false
       - name: Perf gate
         run: |
           set -euo pipefail
-          BENCH="${PERF_BENCH:-lean/bench_playsim.sh}"
-          if [[ ! -e "$BENCH" ]]; then
-            echo "SKIP: perf gate — benchmark command not present yet (milestone 0)"
-            echo "looked for PERF_BENCH=$BENCH"
-            exit 0
+          if [[ -f "${HOME}/.elan/env" ]]; then
+            # shellcheck disable=SC1091
+            source "${HOME}/.elan/env"
           fi
-          bash tools/ci/gate_perf.sh bash "$BENCH"
+          bash tools/ci/gate_perf.sh bash lean/bench_playsim.sh
 
   protected:
     name: protected

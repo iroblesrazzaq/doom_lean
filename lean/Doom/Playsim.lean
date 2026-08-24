@@ -1,7 +1,39 @@
+import Doom.Playsim.Fixed
+import Doom.Playsim.Angle
+import Doom.Playsim.Tables
+import Doom.Playsim.Random
+import Doom.Playsim.Level
+import Doom.Playsim.Info
+import Doom.Playsim.Flags
+import Doom.Playsim.Thinker
+import Doom.Playsim.Mobj
+import Doom.Playsim.Player
+import Doom.Playsim.Input
+import Doom.Playsim.GameState
+import Doom.Playsim.Bsp
+import Doom.Playsim.Demo
+import Doom.Playsim.MapUtil
+import Doom.Playsim.Map
+import Doom.Playsim.Inter
+import Doom.Playsim.Spawn
+import Doom.Playsim.Weapons
+import Doom.Playsim.Psprite
+import Doom.Playsim.Hitscan
+import Doom.Playsim.Combat
+import Doom.Playsim.Sight
+import Doom.Playsim.Sound
+import Doom.Playsim.Spec
+import Doom.Playsim.SargAttack
+import Doom.Playsim.Enemy
+import Doom.Playsim.Think
+import Doom.Playsim.PlayerThink
+import Doom.Playsim.Tick
+import Doom.Playsim.TraceEmit
+
 /-!
 # Doom.Playsim
 
-This namespace will hold the actual Doom playsim port.
+This namespace holds the Doom playsim port.
 
 ## Enforced conventions
 
@@ -16,7 +48,7 @@ while remaining correct, which only the perf gate catches.
 
 namespace Doom.Playsim
 
-/-- Placeholder until the playsim port lands. -/
+/-- Placeholder until broader playsim surface lands. -/
 def placeholder : Unit := ()
 
 end Doom.Playsim

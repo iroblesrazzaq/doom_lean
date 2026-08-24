@@ -1,0 +1,602 @@
+import Doom.Playsim.Angle
+import Doom.Playsim.Bsp
+import Doom.Playsim.Fixed
+import Doom.Playsim.Flags
+import Doom.Playsim.GameState
+import Doom.Playsim.Info
+import Doom.Playsim.Level
+import Doom.Playsim.Map
+import Doom.Playsim.MapUtil
+import Doom.Playsim.Mobj
+import Doom.Playsim.Player
+import Doom.Playsim.Psprite
+import Doom.Playsim.Random
+import Doom.Playsim.Sound
+import Doom.Playsim.Tables
+import Doom.Playsim.Thinker
+
+/-!
+# Doom.Playsim.Spawn
+
+Level spawn path: `P_SpawnMobj` / `P_SpawnMapThing` / `P_SpawnPlayer` /
+`P_SpawnSpecials`, matching oracle call order and RNG draws.
+-/
+
+namespace Doom.Playsim.Spawn
+
+open Doom.Playsim.Angle
+open Doom.Playsim.Bsp
+open Doom.Playsim.Fixed
+open Doom.Playsim.Flags
+open Doom.Playsim.GameState
+open Doom.Playsim.Info
+open Doom.Playsim.Level
+open Doom.Playsim.Map
+open Doom.Playsim.MapUtil
+open Doom.Playsim.Mobj
+open Doom.Playsim.Player
+open Doom.Playsim.Psprite
+open Doom.Playsim.Random
+open Doom.Playsim.Sound
+open Doom.Playsim.Tables
+open Doom.Playsim.Thinker
+
+/-- `p_local.h` `ONFLOORZ` = `INT_MIN`. -/
+def ONFLOORZ : Int32 := Int32.minValue
+/-- `p_local.h` `ONCEILINGZ` = `INT_MAX`. -/
+def ONCEILINGZ : Int32 := Int32.maxValue
+
+def MTF_EASY : Int32 := 1
+def MTF_NORMAL : Int32 := 2
+def MTF_HARD : Int32 := 4
+def MTF_AMBUSH : Int32 := 8
+def MTF_MULTIPLAYER : Int32 := 16
+
+def STROBEBRIGHT : Int32 := 5
+def FASTDARK : Int32 := 15
+def SLOWDARK : Int32 := 35
+
+/-- `MT_BRUISERSHOT` ordinal in `mobjinfo`. -/
+def MT_BRUISERSHOT : Int32 := 16
+/-- `MT_SKULL` ordinal in `mobjinfo`. -/
+def MT_SKULL : Int32 := 18
+/-- `MT_TROOPSHOT` ordinal in `mobjinfo`. -/
+def MT_TROOPSHOT : Int32 := 31
+/-- `MT_HEADSHOT` ordinal in `mobjinfo`. -/
+def MT_HEADSHOT : Int32 := 32
+/-- `MT_ROCKET` ordinal in `mobjinfo`. -/
+def MT_ROCKET : Int32 := 33
+/-- `MT_PLASMA` ordinal in `mobjinfo`. -/
+def MT_PLASMA : Int32 := 34
+/-- `MT_BFG` ordinal in `mobjinfo`. -/
+def MT_BFG : Int32 := 35
+
+/-- `P_ExplodeMissile` callback so Spawn does not import Enemy. -/
+abbrev ExplodeMissileFn := GameState → Nat → Except String GameState
+
+/-- `P_AimLineAttack` callback so Spawn does not import Hitscan. -/
+abbrev AimLineAttackFn :=
+  GameState → Nat → UInt32 → Int32 → Except String (GameState × Int32 × Int32)
+
+private def setArr {α : Type} (arr : Array α) (i : Nat) (v : α) : Array α :=
+  GameState.arrSet arr i v
+
+private def idx (x : Int32) : Nat := x.toNatClampNeg
+
+/-- Skill bit for `P_SpawnMapThing` (`MTF_*`). -/
+def skillBit (skill : Int32) : UInt32 :=
+  if skill == sk_baby then 1
+  else if skill == sk_nightmare then 4
+  else
+    let shift := ((skill - 1).toUInt32) &&& (31 : UInt32)
+    (1 : UInt32) <<< shift
+
+/-- True when mapthing options allow spawn at this skill. -/
+def skillAllows (options skill : Int32) : Bool :=
+  let bit := skillBit skill
+  (options.toUInt32 &&& bit) != 0
+
+/-- Mapthing tics randomization: `1 + (P_Random % tics)` when `tics > 0`. -/
+def randomizeSpawnTics (tics : Int32) (rng : RandomState) : Int32 × RandomState :=
+  if tics > 0 then
+    let (r, rng) := pRandom rng
+    (1 + (r % tics), rng)
+  else
+    (tics, rng)
+
+/-- `P_FindMinSurroundingLight`. -/
+def findMinSurroundingLight (gs : GameState) (secIdx : Nat) (maxLight : Int32) : Int32 :=
+  Id.run do
+    let mut minL := maxLight
+    match gs.sectors[secIdx]? with
+    | none => pure minL
+    | some sec =>
+      let mut i : Nat := 0
+      while i < sec.lines.size do
+        match sec.lines[i]? with
+        | none => pure ()
+        | some li =>
+          match gs.level.lines[li.toNat]? with
+          | none => pure ()
+          | some ld =>
+            match getNextSector ld secIdx with
+            | none => pure ()
+            | some otherIdx =>
+              match gs.sectors[otherIdx]? with
+              | none => pure ()
+              | some other =>
+                if other.lightlevel < minL then
+                  minL := other.lightlevel
+        i := i + 1
+      pure minL
+
+/--
+`P_SetThingPosition` (delegates to `MapUtil` — sector + blockmap links).
+-/
+def setThingPosition (gs : GameState) (mobjIdx : Nat) : Except String GameState :=
+  MapUtil.setThingPosition gs mobjIdx
+
+/-- `P_SpawnMobj` — does **not** invoke state action routines. -/
+def spawnMobj (gs0 : GameState) (x y z : Int32) (typeId : Int32) :
+    Except String (GameState × Nat) := do
+  let ti := idx typeId
+  if typeId < 0 || ti >= mobjinfo.size then
+    throw s!"spawnMobj: bad type {typeId}"
+  match mobjinfo[ti]? with
+  | none => throw "spawnMobj: missing mobjinfo"
+  | some (info : MobjInfo) =>
+    match states[info.spawnstate.toNat]? with
+    | none => throw "spawnMobj: missing spawn state"
+    | some (st : State) =>
+      let (lastlookRaw, rng) := pRandom gs0.rng
+      let lastlook := lastlookRaw % (MAXPLAYERS.toInt32)
+      let reactiontime : Int32 :=
+        if gs0.gameskill != sk_nightmare then info.reactiontime else 0
+      let mo : Mobj := {
+        Mobj.empty with
+        typeId := typeId
+        x := x
+        y := y
+        radius := info.radius
+        height := info.height
+        flags := info.flags
+        health := info.spawnhealth
+        reactiontime := reactiontime
+        lastlook := lastlook
+        state := info.spawnstate
+        tics := st.tics
+        sprite := st.sprite
+        frame := st.frame
+      }
+      let mobjIdx := gs0.mobjs.size
+      let gs1 := { gs0 with mobjs := gs0.mobjs.push mo, rng }
+      let gs2 ← setThingPosition gs1 mobjIdx
+      match gs2.mobjs[mobjIdx]? with
+      | none => throw "spawnMobj: lost mobj"
+      | some mo2 =>
+        match gs2.level.subsectors[mo2.subsector.toNat]? with
+        | none => throw "spawnMobj: subsector missing after link"
+        | some ss =>
+          match gs2.sectors[ss.sector.toNat]? with
+          | none => throw "spawnMobj: sector missing"
+          | some sec =>
+            let floorz := sec.floorheight
+            let ceilingz := sec.ceilingheight
+            let z' :=
+              if z == ONFLOORZ then floorz
+              else if z == ONCEILINGZ then ceilingz - info.height
+              else z
+            let mo3 := { mo2 with floorz, ceilingz, z := z' }
+            let gs3 := { gs2 with mobjs := setArr gs2.mobjs mobjIdx mo3 }
+            let (gs4, tid) := addThinker gs3 THF_MOBJ mobjIdx.toUInt32
+            match gs4.mobjs[mobjIdx]? with
+            | none => throw "spawnMobj: lost mobj after thinker"
+            | some mo4 =>
+              let mo5 := { mo4 with traceId := tid }
+              pure ({ gs4 with mobjs := setArr gs4.mobjs mobjIdx mo5 }, mobjIdx)
+
+private def setMo (gs : GameState) (i : Nat) (mo : Mobj) : GameState :=
+  { gs with mobjs := setArr gs.mobjs i mo }
+
+/-- `P_CheckMissileSpawn`. -/
+def checkMissileSpawn (damageMobj : Map.DamageMobjFn) (explodeMissile : ExplodeMissileFn)
+    (gs0 : GameState) (thIdx : Nat) : Except String GameState := do
+  match gs0.mobjs[thIdx]? with
+  | none => throw "P_CheckMissileSpawn: bad mobj"
+  | some th0 =>
+    let (r, rng) := pRandom gs0.rng
+    let mut tics := th0.tics - (r &&& 3)
+    if tics < 1 then tics := 1
+    let th := {
+      th0 with
+      tics
+      x := th0.x + (th0.momx >>> 1)
+      y := th0.y + (th0.momy >>> 1)
+      z := th0.z + (th0.momz >>> 1)
+    }
+    let gs := { setMo gs0 thIdx th with rng }
+    let (gs1, _, ok) ← tryMove gs thIdx th.x th.y (some damageMobj)
+    if ok then
+      pure gs1
+    else
+      explodeMissile gs1 thIdx
+
+/-- `P_SpawnMissile`. -/
+def spawnMissile (damageMobj : Map.DamageMobjFn) (explodeMissile : ExplodeMissileFn)
+    (gs0 : GameState) (sourceIdx destIdx : Nat) (typeId : Int32) :
+    Except String (GameState × Nat) := do
+  match gs0.mobjs[sourceIdx]?, gs0.mobjs[destIdx]? with
+  | none, _ => throw "P_SpawnMissile: bad source"
+  | _, none => throw "P_SpawnMissile: bad dest"
+  | some source, some dest =>
+    let (gs1, thIdx) ← spawnMobj gs0 source.x source.y (source.z + 4 * 8 * FRACUNIT) typeId
+    match gs1.mobjs[thIdx]? with
+    | none => throw "P_SpawnMissile: lost mobj"
+    | some th0 =>
+      let info ←
+        match mobjinfo[th0.typeId.toNatClampNeg]? with
+        | some i => pure i
+        | none => throw "P_SpawnMissile: missing mobjinfo"
+      let mut gs := gs1
+      if info.seesound != 0 then
+        gs := {
+          gs with
+          rng := startSoundPitchRngMaybe gs.rng info.seesound.toNatClampNeg
+            (originAudible gs thIdx)
+        }
+      match gs.mobjs[thIdx]? with
+      | none => throw "P_SpawnMissile: lost after sound"
+      | some th1 =>
+        let th := { th1 with target := sourceIdx.toInt32 }
+        gs := setMo gs thIdx th
+        let mut an := pointToAngle2 source.x source.y dest.x dest.y
+        if (dest.flags &&& MF_SHADOW) != 0 then
+          let (d, rng) := pSubRandom gs.rng
+          gs := { gs with rng }
+          an := an + (d.toUInt32 <<< 20)
+        let fine := (an >>> ANGLETOFINESHIFT.toUInt32) &&& FINEMASK
+        match finecosine[fine.toNat]?, finesine[fine.toNat]? with
+        | none, _ => throw "P_SpawnMissile: fine table OOB"
+        | _, none => throw "P_SpawnMissile: fine table OOB"
+        | some cosv, some sinv =>
+          match gs.mobjs[thIdx]? with
+          | none => throw "P_SpawnMissile: lost before mom"
+          | some th2 =>
+            let momx := fixedMul info.speed cosv
+            let momy := fixedMul info.speed sinv
+            let mut dist := MapUtil.aproxDistance (dest.x - source.x) (dest.y - source.y)
+            dist := dist / info.speed
+            if dist < 1 then dist := 1
+            let momz := (dest.z - source.z) / dist
+            gs := setMo gs thIdx { th2 with angle := an, momx, momy, momz }
+            gs ← checkMissileSpawn damageMobj explodeMissile gs thIdx
+            pure (gs, thIdx)
+
+/-- `P_SpawnPlayerMissile`. Tries to aim at a nearby monster. -/
+def spawnPlayerMissile (aimLineAttack : AimLineAttackFn)
+    (damageMobj : Map.DamageMobjFn) (explodeMissile : ExplodeMissileFn)
+    (gs0 : GameState) (sourceIdx : Nat) (typeId : Int32) :
+    Except String (GameState × Nat) := do
+  match gs0.mobjs[sourceIdx]? with
+  | none => throw "P_SpawnPlayerMissile: bad source"
+  | some source0 =>
+    let mut an := source0.angle
+    let mut gs := gs0
+    let range := 16 * 64 * FRACUNIT
+    let (gs1, slope1, lt1) ← aimLineAttack gs sourceIdx an range
+    gs := gs1
+    let mut slope := slope1
+    let mut lt := lt1
+    if lt < 0 then
+      an := an + ((1 : UInt32) <<< 26)
+      let (gs2, slope2, lt2) ← aimLineAttack gs sourceIdx an range
+      gs := gs2
+      slope := slope2
+      lt := lt2
+      if lt < 0 then
+        an := an - ((2 : UInt32) <<< 26)
+        let (gs3, slope3, lt3) ← aimLineAttack gs sourceIdx an range
+        gs := gs3
+        slope := slope3
+        lt := lt3
+      if lt < 0 then
+        an := source0.angle
+        slope := 0
+    match gs.mobjs[sourceIdx]? with
+    | none => throw "P_SpawnPlayerMissile: source lost after aim"
+    | some source =>
+      let z := source.z + 4 * 8 * FRACUNIT
+      let (gsS, thIdx) ← spawnMobj gs source.x source.y z typeId
+      match gsS.mobjs[thIdx]? with
+      | none => throw "P_SpawnPlayerMissile: lost mobj"
+      | some th0 =>
+        let info ←
+          match mobjinfo[th0.typeId.toNatClampNeg]? with
+          | some i => pure i
+          | none => throw "P_SpawnPlayerMissile: missing mobjinfo"
+        gs := gsS
+        if info.seesound != 0 then
+          gs := {
+            gs with
+            rng := startSoundPitchRngMaybe gs.rng info.seesound.toNatClampNeg
+              (originAudible gs thIdx)
+          }
+        match gs.mobjs[thIdx]? with
+        | none => throw "P_SpawnPlayerMissile: lost after sound"
+        | some th1 =>
+          let th := { th1 with target := sourceIdx.toInt32, angle := an }
+          gs := setMo gs thIdx th
+          let fine := (an >>> ANGLETOFINESHIFT.toUInt32) &&& FINEMASK
+          match finecosine[fine.toNat]?, finesine[fine.toNat]? with
+          | none, _ => throw "P_SpawnPlayerMissile: fine table OOB"
+          | _, none => throw "P_SpawnPlayerMissile: fine table OOB"
+          | some cosv, some sinv =>
+            match gs.mobjs[thIdx]? with
+            | none => throw "P_SpawnPlayerMissile: lost before mom"
+            | some th2 =>
+              let momx := fixedMul info.speed cosv
+              let momy := fixedMul info.speed sinv
+              let momz := fixedMul info.speed slope
+              gs := setMo gs thIdx { th2 with momx, momy, momz }
+              gs ← checkMissileSpawn damageMobj explodeMissile gs thIdx
+              pure (gs, thIdx)
+
+/-- `P_SpawnPlayer`. -/
+def spawnPlayer (gs0 : GameState) (mthing : Thing) : Except String GameState := do
+  if mthing.typeId == 0 then
+    pure gs0
+  else
+    let pnum := idx (mthing.typeId - 1)
+    if pnum >= MAXPLAYERS then
+      throw s!"spawnPlayer: bad player type {mthing.typeId}"
+    match gs0.playeringame[pnum]? with
+    | some true =>
+      let p0 := match gs0.players[pnum]? with | some x => x | none => Player.empty
+      let p1 := if p0.playerstate == PST_REBORN then playerReborn p0 else p0
+      let x := mthing.x <<< 16
+      let y := mthing.y <<< 16
+      let gs1 := { gs0 with players := setArr gs0.players pnum p1 }
+      let (gs2, mobjIdx) ← spawnMobj gs1 x y ONFLOORZ 0
+      match gs2.mobjs[mobjIdx]? with
+      | none => throw "spawnPlayer: mobj missing"
+      | some mo =>
+        let angle := ANG45 * (mthing.angle / 45).toUInt32
+        let flags :=
+          if mthing.typeId > 1 then
+            mo.flags ||| (((mthing.typeId - 1).toUInt32) <<< MF_TRANSSHIFT)
+          else
+            mo.flags
+        let mo' := { mo with angle, flags, player := pnum.toInt32, health := p1.health }
+        -- C: `P_SpawnPlayer` sets `viewheight` only; `viewz` stays 0 from `G_PlayerReborn` memset.
+        let p2 ← setupPsprites {
+          p1 with
+          mo := mobjIdx.toInt32
+          playerstate := PST_LIVE
+          refire := 0
+          viewheight := VIEWHEIGHT
+          message := none
+        }
+        let gs3 := {
+          gs2 with
+          players := setArr gs2.players pnum p2
+          mobjs := setArr gs2.mobjs mobjIdx mo'
+        }
+        if pnum == gs3.consoleplayer then
+          pure (huStart (stInitData gs3))
+        else
+          pure gs3
+    | _ => pure gs0
+
+/-- Resolve `mobjinfo` index by `doomednum`. -/
+def findTypeByDoomedNum (doomed : Int32) : Option Int32 :=
+  Id.run do
+    let mut i : Nat := 0
+    let mut found : Option Int32 := none
+    while i < mobjinfo.size && found.isNone do
+      match mobjinfo[i]? with
+      | some info =>
+        if info.doomednum == doomed then
+          found := some i.toInt32
+      | none => pure ()
+      i := i + 1
+    pure found
+
+/-- `P_SpawnMapThing`. -/
+def spawnMapThing (gs0 : GameState) (mthing : Thing) : Except String GameState := do
+  if mthing.typeId == 11 then
+    -- deathmatch start: record-only stub (array not stored in P2a-i)
+    pure gs0
+  else if mthing.typeId <= 0 then
+    pure gs0
+  else if mthing.typeId <= 4 then
+    -- player start: always record conceptually; spawn only when !deathmatch
+    if gs0.deathmatch then
+      pure gs0
+    else
+      spawnPlayer gs0 mthing
+  else if !gs0.netgame && (mthing.options &&& MTF_MULTIPLAYER) != 0 then
+    pure gs0
+  else if !skillAllows mthing.options gs0.gameskill then
+    pure gs0
+  else
+    match findTypeByDoomedNum mthing.typeId with
+    | none => throw s!"spawnMapThing: unknown type {mthing.typeId}"
+    | some typeId =>
+      match mobjinfo[idx typeId]? with
+      | none => throw "spawnMapThing: mobjinfo missing"
+      | some (info : MobjInfo) =>
+        if gs0.deathmatch && (info.flags &&& MF_NOTDMATCH) != 0 then
+          pure gs0
+        else if gs0.nomonsters && (typeId == MT_SKULL || (info.flags &&& MF_COUNTKILL) != 0) then
+          pure gs0
+        else
+          let x := mthing.x <<< 16
+          let y := mthing.y <<< 16
+          let z := if (info.flags &&& MF_SPAWNCEILING) != 0 then ONCEILINGZ else ONFLOORZ
+          let (gs1, mobjIdx) ← spawnMobj gs0 x y z typeId
+          match gs1.mobjs[mobjIdx]? with
+          | none => throw "spawnMapThing: mobj missing"
+          | some mo =>
+            let (tics, rng) := randomizeSpawnTics mo.tics gs1.rng
+            let totalkills :=
+              if (mo.flags &&& MF_COUNTKILL) != 0 then gs1.totalkills + 1 else gs1.totalkills
+            let totalitems :=
+              if (mo.flags &&& MF_COUNTITEM) != 0 then gs1.totalitems + 1 else gs1.totalitems
+            let angle := ANG45 * (mthing.angle / 45).toUInt32
+            let flags :=
+              if (mthing.options &&& MTF_AMBUSH) != 0 then mo.flags ||| MF_AMBUSH else mo.flags
+            let mo' := { mo with tics, angle, flags }
+            pure {
+              gs1 with
+              mobjs := setArr gs1.mobjs mobjIdx mo'
+              rng
+              totalkills
+              totalitems
+            }
+
+/-- Clear sector special after spawning a light thinker. -/
+def clearSectorSpecial (gs : GameState) (secIdx : Nat) : GameState :=
+  match gs.sectors[secIdx]? with
+  | none => gs
+  | some sec => { gs with sectors := setArr gs.sectors secIdx { sec with special := 0 } }
+
+def spawnLightFlash (gs0 : GameState) (secIdx : Nat) : GameState :=
+  match gs0.sectors[secIdx]? with
+  | none => gs0
+  | some sec =>
+    let gs1 := clearSectorSpecial gs0 secIdx
+    let payload := gs1.lightFlashes.size.toUInt32
+    let (gs2, _) := addThinker gs1 THF_LIGHTFLASH payload
+    let minlight := findMinSurroundingLight gs2 secIdx sec.lightlevel
+    let (r, rng) := pRandom gs2.rng
+    let flash : LightFlash := {
+      sector := secIdx.toUInt32
+      maxlight := sec.lightlevel
+      minlight := minlight
+      maxtime := 64
+      mintime := 7
+      count := (r &&& (64 : Int32)) + 1
+    }
+    { gs2 with lightFlashes := gs2.lightFlashes.push flash, rng }
+
+def spawnStrobeFlash (gs0 : GameState) (secIdx : Nat) (fastOrSlow : Int32) (inSync : Bool) :
+    GameState :=
+  match gs0.sectors[secIdx]? with
+  | none => gs0
+  | some sec =>
+    let payload := gs0.strobes.size.toUInt32
+    let (gs1, _) := addThinker gs0 THF_STROBEFLASH payload
+    let min0 := findMinSurroundingLight gs1 secIdx sec.lightlevel
+    let minlight := if min0 == sec.lightlevel then (0 : Int32) else min0
+    let gs2 := clearSectorSpecial gs1 secIdx
+    let (count, rng) :=
+      if !inSync then
+        let (r, rng) := pRandom gs2.rng
+        ((r &&& (7 : Int32)) + 1, rng)
+      else
+        ((1 : Int32), gs2.rng)
+    let flash : StrobeFlash := {
+      sector := secIdx.toUInt32
+      darktime := fastOrSlow
+      brighttime := STROBEBRIGHT
+      maxlight := sec.lightlevel
+      minlight := minlight
+      count := count
+    }
+    { gs2 with strobes := gs2.strobes.push flash, rng }
+
+def spawnGlowingLight (gs0 : GameState) (secIdx : Nat) : GameState :=
+  match gs0.sectors[secIdx]? with
+  | none => gs0
+  | some sec =>
+    let payload := gs0.glows.size.toUInt32
+    let (gs1, _) := addThinker gs0 THF_GLOW payload
+    let minlight := findMinSurroundingLight gs1 secIdx sec.lightlevel
+    let g : Glow := {
+      sector := secIdx.toUInt32
+      minlight := minlight
+      maxlight := sec.lightlevel
+      direction := -1
+    }
+    let gs2 := clearSectorSpecial gs1 secIdx
+    { gs2 with glows := gs2.glows.push g }
+
+/-- `P_SpawnSpecials` (sector specials only; line scrollers deferred). -/
+def spawnSpecials (gs0 : GameState) : GameState :=
+  Id.run do
+    let mut gs := gs0
+    let mut i : Nat := 0
+    while i < gs.sectors.size do
+      match gs.sectors[i]? with
+      | none => pure ()
+      | some sec =>
+        if sec.special != 0 then
+          let sp := sec.special
+          if sp == 1 then
+            gs := spawnLightFlash gs i
+          else if sp == 2 then
+            gs := spawnStrobeFlash gs i FASTDARK false
+          else if sp == 3 then
+            gs := spawnStrobeFlash gs i SLOWDARK false
+          else if sp == 4 then
+            gs := spawnStrobeFlash gs i FASTDARK false
+            match gs.sectors[i]? with
+            | some s => gs := { gs with sectors := setArr gs.sectors i { s with special := 4 } }
+            | none => pure ()
+          else if sp == 8 then
+            gs := spawnGlowingLight gs i
+          else if sp == 9 then
+            gs := { gs with totalsecret := gs.totalsecret + 1 }
+          else if sp == 12 then
+            gs := spawnStrobeFlash gs i SLOWDARK true
+          else if sp == 13 then
+            gs := spawnStrobeFlash gs i FASTDARK true
+          else
+            pure ()
+      i := i + 1
+    pure gs
+
+/-- Non-commercial Doom II thing filter from `P_LoadThings` (break on first). -/
+def isDoom2OnlyThing (typeId : Int32) : Bool :=
+  typeId == 68 || typeId == 64 || typeId == 88 || typeId == 89 || typeId == 69
+    || typeId == 67 || typeId == 71 || typeId == 65 || typeId == 66 || typeId == 84
+
+/--
+Spawn all map things then specials. Caller must have already cleared RNG
+(`M_ClearRandom` / `G_InitNew`) and set `traceIdCounter = 1`.
+-/
+def spawnLevelThings (gs0 : GameState) : Except String GameState := do
+  let mut gs := gs0
+  let mut i : Nat := 0
+  let mut stop := false
+  while i < gs.level.things.size && !stop do
+    match gs.level.things[i]? with
+    | none => throw "spawnLevelThings: missing thing"
+    | some mt =>
+      -- Oracle only aborts the remaining THINGS loop in non-commercial.
+      if !gs.commercial && isDoom2OnlyThing mt.typeId then
+        stop := true
+      else
+        gs ← spawnMapThing gs mt
+    i := i + 1
+  pure (spawnSpecials gs)
+
+/--
+Full DEMO1-style setup after geometry load:
+`M_ClearRandom` → reset thinkers/trace ids → spawn things → spawn specials.
+-/
+def setupSpawnedLevel (level : LevelData) (skill : Int32) (playeringame : Array Bool)
+    (consoleplayer : Nat) : Except String GameState := do
+  let mut gs := initFromLevel level skill playeringame consoleplayer
+  gs := { gs with rng := clearRandom }
+  let mut players := gs.players
+  let mut pi : Nat := 0
+  while pi < MAXPLAYERS do
+    match players[pi]? with
+    | some p => players := setArr players pi { p with playerstate := PST_REBORN }
+    | none => pure ()
+    pi := pi + 1
+  gs := { gs with players, traceIdCounter := 1, thinkers := #[], mobjs := #[] }
+  spawnLevelThings gs
+
+end Doom.Playsim.Spawn

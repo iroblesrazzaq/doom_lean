@@ -2,4 +2,8 @@ import Doom.Harness.Fnv
 import Doom.Harness.TraceFormat
 import Doom.Harness.TraceReader
 import Doom.Harness.Stubs
+import Doom.Harness.DisplaySim
+import Doom.Harness.Real
+import Doom.Render
 import Doom.Playsim
+import Doom.Wad

@@ -1,12 +1,22 @@
+import Doom.Harness.DisplaySim
 import Doom.Harness.Fnv
 import Doom.Harness.TraceFormat
 import Doom.Harness.TraceReader
 import Doom.Harness.Stubs
+import Doom.Playsim.GameState
+import Doom.Playsim.Level
+import Doom.Playsim.Random
+import Doom.Playsim.Tick
 
+open Doom.Harness.DisplaySim
 open Doom.Harness.Fnv
 open Doom.Harness.TraceFormat
 open Doom.Harness.TraceReader
 open Doom.Harness.Stubs
+open Doom.Playsim.GameState
+open Doom.Playsim.Level
+open Doom.Playsim.Random
+open Doom.Playsim.Tick
 
 private def fail (msg : String) : IO UInt32 := do
   IO.eprintln s!"FAIL: {msg}"
@@ -71,5 +81,44 @@ def main (_args : List String) : IO UInt32 := do
   -- cleanup best-effort
   try IO.FS.removeFile (base.toString ++ ".trc") catch _ => pure ()
   try IO.FS.removeFile (base.toString ++ ".dig") catch _ => pure ()
+
+  -- (d) wipeInitMelt: rndindex 2 → 66, then one M_Random (ST_Ticker) → 67
+  let rng2 : RandomState := { prndindex := 0, rndindex := 2 }
+  let rng66 := wipeInitMelt rng2
+  if rng66.rndindex != 66 then
+    return (← fail s!"wipeInitMelt 2→66: got {rng66.rndindex}")
+  let emptyLevel : LevelData := {
+    vertexes := #[]
+    sectors := #[]
+    sides := #[]
+    lines := #[]
+    segs := #[]
+    subsectors := #[]
+    nodes := #[]
+    things := #[]
+    blockmap := {
+      originX := 0
+      originY := 0
+      width := 0
+      height := 0
+      lump := #[]
+    }
+    reject := ByteArray.empty
+  }
+  let gsBase := initFromLevel emptyLevel 2 (Array.replicate 4 false) 0
+  let gsAfter := stTicker { gsBase with rng := rng66 }
+  if gsAfter.rng.rndindex != 67 then
+    return (← fail s!"stTicker after wipe →67: got {gsAfter.rng.rndindex}")
+  -- onFrame: demoscreen → level triggers wipe once; second call is no-op.
+  let (d1, rngW) := onFrame initDisplay rng2 gsLevel
+  if d1.wipegamestate != gsLevel then
+    return (← fail "onFrame did not sync wipegamestate to GS_LEVEL")
+  if rngW.rndindex != 66 then
+    return (← fail s!"onFrame wipe rndindex: got {rngW.rndindex}")
+  let (d2, rngW2) := onFrame d1 rngW gsLevel
+  if d2.wipegamestate != gsLevel || rngW2.rndindex != 66 then
+    return (← fail "onFrame second call should be RNG no-op")
+  IO.println "ok: wipeInitMelt / onFrame DEMO1 path"
+
   IO.println "harness-test: all passed"
   pure 0
